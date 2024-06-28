@@ -9,19 +9,22 @@ import h5py
 from PIL import Image
 from torchvision import transforms
 from hyperspectral2RGBv2 import hyperspectral2RGB,hyperspectral2RGBvolume
+from bin_data import bin_data
 
 # def min_max_scale(x):
 #     return (x - x.min()) / (x.max() - x.min())
 
-def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(lam,z,x,y)
+def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
+    x = torch.swapaxes(x, 0, 1)
+    spc = torch.swapaxes(spc, 0, 1) 
     resizer_256 = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR)
     
     zw = torch.mean(cmos, dim=(1, 2))
     zw /= zw.max()
     
     # Starting point
-    for z in range(x.shape[1]):
-        x[:, z, :, :] = resizer_256(spc) * zw[z]
+    for z in range(x.shape[2]):
+        x[:, :, z, :, :] = resizer_256(spc) * zw[z]
     
     x = torch.nn.Parameter(x, requires_grad=True)
     optimizer = torch.optim.Adam([x], lr=0.01)
@@ -40,16 +43,19 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(lam,z,x,y)
 
     for it in range(80):
         optimizer.zero_grad()
+        flattened_x = x.flatten()
 
+        resized = torch.cat([resizer_32(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x]) # for each lambda
+        
         # spectral_loss = spectral_fidelity(spc.flatten(), resizer_32(torch.mean(x, dim=1)).flatten())
-        spectral_loss = spectral_fidelity(spc.flatten(), resizer_32(torch.mean(x, dim=1)).flatten())
-        spatial_loss = 5 * spatial_fidelity(cmos.flatten(), torch.mean(x, dim=0).flatten())
+        spectral_loss = spectral_fidelity(spc.flatten(), resized.flatten())
+        spatial_loss = 5 * spatial_fidelity(cmos.flatten(), torch.mean(x, dim=(0,1)).flatten())
         # intensity_loss = intensity_fidelity(torch.mean(cmos,dim=(1,2)).flatten(), torch.mean(x,dim=(0,2,3)).flatten())
         # spectral_slice_loss = spectral_slice_fidelity(spc.repeat(17,1,1,1).transpose(0,1).flatten(), resizer_32(x).flatten())
         # for i in range(cmos.size(0)):
         #     spectral_slice_loss += spectral_slice_fidelity(spc.flatten(), resizer_32(x[:,i,:,:]).flatten())
         # global_lambda_loss =  global_lambda_fidelity(torch.mean(spc, dim=(1, 2)), torch.mean(x, dim=(1,2,3)))
-        non_neg_loss = non_neg_fidelity(x, torch.nn.functional.relu(x)) 
+        non_neg_loss = non_neg_fidelity(flattened_x, torch.nn.functional.relu(flattened_x)) 
 
         loss = spectral_loss + spatial_loss + non_neg_loss # + intensity_loss # intensity_loss
 
@@ -67,6 +73,7 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(lam,z,x,y)
         
         # spectral_slice_loss = 0
 
+    x = torch.swapaxes(x, 0, 1)
     return x
 
 def optimize2d(x: torch.tensor, spc, cmos) -> torch.tensor:  #x->(lam,x,y)
@@ -110,8 +117,8 @@ def optimize2d(x: torch.tensor, spc, cmos) -> torch.tensor:  #x->(lam,x,y)
 
 def main():
     data_dir = '/Users/federicosimoni/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/Code/CS-FLIM_lab'
-    day = '20240617'
-    filenamecmos = 'kidney_cells_520_610_w4_rec_Hil2D_FOVcorrected.mat'
+    day = '20240612'
+    filenamecmos = '3beads_triangle_w4_rec_Hil2D_FOVcorrected.mat'
     mat_fname = pjoin(data_dir,day,filenamecmos)
     with h5py.File(mat_fname, "r") as f:
         mat_contents = h5py.File(mat_fname)
@@ -140,30 +147,45 @@ def main():
     cmos = torch.from_numpy(cmos.astype(np.float32))
 
 
-    filenamespc = '520_kidneyCells_550_550_610_SPC_raw_proc_tlxy.mat'
+    filenamespc = '480_3beads_triangle_505_500_575_SPC_raw_proc_tlxy.mat'
     mat_fname = pjoin(data_dir,day,filenamespc)
     spc = sp.io.loadmat(mat_fname)["im"]  # (time, lambda, img_dim, img_dim)
+    t = np.squeeze(sp.io.loadmat(mat_fname)["t"])
     spc[:,:,0,0] = spc[:,:,1,0]
     # sp.io.savemat('spcOriginal.mat', {'spc': spc})
-    filenamelambda = "610_Lambda_L16.mat"
+    filenamelambda = "575_Lambda_L16.mat"
     mat_fname = pjoin(data_dir,"Calibrations",filenamelambda)
     lam = np.squeeze(sp.io.loadmat(mat_fname)["lambda"])
+    
+    time_dacay = np.sum(spc,axis=(1,2,3))
+    plt.plot(t, time_dacay)
+    plt.title('Initial global time')
+    plt.show()
+    
+    #data binning
+    t,spc,dt = bin_data(spc,t,2)
+    
+    time_dacay = np.sum(spc,axis=(1,2,3))
+    plt.plot(t, time_dacay)
+    plt.title('After bin - global spectrum')
+    plt.show()
+    
     # lam = np.linspace(550,650,16)
-    spc = spc.mean(axis=0)  # (lambda, img_dim, img_dim)
+    # spc = spc.mean(axis=0)  # (lambda, img_dim, img_dim)
     spc = spc/np.max(spc)
     
     # =========== PLOTS =============
-    imageColor = hyperspectral2RGB(lam,spc)
+    imageColor = hyperspectral2RGB(lam,np.mean(spc,axis=0))
 
-    plt.plot(lam, np.mean(spc,axis=(1,2)))
+    plt.plot(lam, np.mean(spc,axis=(0,2,3)))
     plt.title('Initial global spectrum')
     plt.show()
 
-    plt.imshow(np.mean(spc,axis=0))
+    plt.imshow(np.mean(spc,axis=(0,1)))
     plt.title('Initial SPC image')
     plt.show()
     
-    plt.imshow(cmos[10,:,:])
+    plt.imshow(cmos[5,:,:])
     plt.title('Initial CMOS image')
     plt.show()
     
@@ -171,8 +193,8 @@ def main():
     plt.title('Initial colored SPC image')
     plt.show()
     
-    plt.plot(lam,spc[:,10,11])
-    plt.plot(lam,spc[:,9,16])
+    plt.plot(lam,np.mean(spc[:,:,10,11],axis=0))
+    plt.plot(lam,np.mean(spc[:,:,16,19],axis=0))
     plt.title('Initial spectrum specific point')
     plt.show()
     
@@ -188,16 +210,18 @@ def main():
     
     spc = torch.from_numpy(spc.astype(np.float32))
 
-    if cmos.ndim==3:
-        x = optimize(x=torch.zeros(16, zdim, dimFused, dimFused), spc=spc, cmos=cmos)
+    if cmos.ndim>=3:
+        x = optimize(x=torch.zeros(len(t), 16, zdim, dimFused, dimFused), spc=spc, cmos=cmos)
     else:
         x = optimize2d(x=torch.zeros(16, dimFused, dimFused), spc=spc, cmos=cmos)
+        
     x = x.cpu().detach().numpy()
+    np.save("x.npy", x)
     
     # =========== PLOTS =============
-    # PLOT IF THE IMAGE IS Z-STACK (lam,z,x,y)
-    if x.ndim==4:
-        zxy = np.sum(x, axis=0)
+    # PLOT IF THE IMAGE IS Z-STACK (time,lam,z,x,y)
+    if x.ndim==5:
+        zxy = np.sum(x, axis=(0,1))
         zxy /= zxy.max()
 
         #maxCMOS = zxy.max()
@@ -215,32 +239,32 @@ def main():
         # plt.show()
 
         for i in range(1, zdim, 2):
-            plt.plot(lam, np.mean(x[:, i, :, :],axis=(1,2)), label=f"{i}")
+            plt.plot(lam, np.mean(x[:, :, i, :, :],axis=(0,2,3)), label=f"{i}")
         plt.legend()
         plt.tight_layout()
         plt.title('Global spectrum for i-th slice')
         plt.show()
         
         for i in range(1, zdim, 2):
-            plt.plot(lam, x[:, i, 80, 88], label=f"{i}")
+            plt.plot(lam, np.mean(x[:, :, i, 125, 147],axis=0), label=f"{i}")
         plt.legend()
         plt.tight_layout()
         plt.title('Specific point spectrum for i-th slice')
         plt.show()
         
         for i in range(1, zdim, 2):
-            plt.plot(lam, x[:, i, 72, 128], label=f"{i}")
+            plt.plot(lam, np.mean(x[:, :, i, 72, 128],axis=0), label=f"{i}")
         plt.legend()
         plt.tight_layout()
         plt.title('Specific point spectrum for i-th slice - no signal')
         plt.show()
         
-        imageColorSlice = hyperspectral2RGB(lam,x[:,10,:,:])
+        imageColorSlice = hyperspectral2RGB(lam,np.mean(x[:,:,5,:,:],axis=0))
         plt.imshow(imageColorSlice)
         plt.title('Colored SPC image of one slice')
         plt.show()
         
-        slicesRGB = hyperspectral2RGBvolume(lam,x)
+        slicesRGB = hyperspectral2RGBvolume(lam,np.mean(x,axis=0))
         
         # dimPlot=int(np.ceil(np.sqrt(zdim)))
         # _, axs = plt.subplots(dimPlot,dimPlot)
