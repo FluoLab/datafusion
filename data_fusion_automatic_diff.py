@@ -17,7 +17,7 @@ from bin_data import bin_data
 def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
     x = torch.swapaxes(x, 0, 1)
     spc = torch.swapaxes(spc, 0, 1) 
-    resizer_256 = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR)
+    resizer_256 = transforms.Resize((128, 128), interpolation=transforms.InterpolationMode.BILINEAR)
     
     zw = torch.mean(cmos, dim=(1, 2))
     zw /= zw.max()
@@ -27,7 +27,7 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
         x[:, :, z, :, :] = resizer_256(spc) * zw[z]
     
     x = torch.nn.Parameter(x, requires_grad=True)
-    optimizer = torch.optim.Adam([x], lr=0.01)
+    optimizer = torch.optim.Adam([x], lr=0.1)
 
     spectral_fidelity = torch.nn.MSELoss(reduction="mean")
     spatial_fidelity = torch.nn.MSELoss(reduction="mean")
@@ -38,10 +38,10 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
     # spectral_slice_loss = 0
     # global_lambda_fidelity = torch.nn.MSELoss(reduction="mean")
     
-    resizer_32 = torch.nn.AvgPool2d(8, 8)
+    resizer_32 = torch.nn.AvgPool2d(4, 4)
     #resizer_128 = transforms.Resize((128, 128), interpolation=transforms.InterpolationMode.BILINEAR)
 
-    for it in range(80):
+    for it in range(30):
         optimizer.zero_grad()
         flattened_x = x.flatten()
 
@@ -49,7 +49,7 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
         
         # spectral_loss = spectral_fidelity(spc.flatten(), resizer_32(torch.mean(x, dim=1)).flatten())
         spectral_loss = spectral_fidelity(spc.flatten(), resized.flatten())
-        spatial_loss = 5 * spatial_fidelity(cmos.flatten(), torch.mean(x, dim=(0,1)).flatten())
+        spatial_loss = spatial_fidelity(cmos.flatten(), torch.mean(x, dim=(0,1)).flatten())
         # intensity_loss = intensity_fidelity(torch.mean(cmos,dim=(1,2)).flatten(), torch.mean(x,dim=(0,2,3)).flatten())
         # spectral_slice_loss = spectral_slice_fidelity(spc.repeat(17,1,1,1).transpose(0,1).flatten(), resizer_32(x).flatten())
         # for i in range(cmos.size(0)):
@@ -117,13 +117,13 @@ def optimize2d(x: torch.tensor, spc, cmos) -> torch.tensor:  #x->(lam,x,y)
 
 def main():
     data_dir = '/Users/federicosimoni/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/Code/CS-FLIM_lab'
-    day = '20240612'
-    filenamecmos = '3beads_triangle_w4_rec_Hil2D_FOVcorrected.mat'
+    day = '20240617'
+    filenamecmos = 'kidney_cells_520_610_w4_rec_Hil2D_FOVcorrected.mat'
     mat_fname = pjoin(data_dir,day,filenamecmos)
     with h5py.File(mat_fname, "r") as f:
         mat_contents = h5py.File(mat_fname)
 
-    dimFused = 256
+    dimFused = 128
     # print(list(mat_contents.keys()))
     data = mat_contents['I']
     cmos = np.array(data)
@@ -147,13 +147,13 @@ def main():
     cmos = torch.from_numpy(cmos.astype(np.float32))
 
 
-    filenamespc = '480_3beads_triangle_505_500_575_SPC_raw_proc_tlxy.mat'
+    filenamespc = '520_kidneyCells_550_550_610_SPC_raw_proc_tlxy.mat'
     mat_fname = pjoin(data_dir,day,filenamespc)
     spc = sp.io.loadmat(mat_fname)["im"]  # (time, lambda, img_dim, img_dim)
     t = np.squeeze(sp.io.loadmat(mat_fname)["t"])
     spc[:,:,0,0] = spc[:,:,1,0]
     # sp.io.savemat('spcOriginal.mat', {'spc': spc})
-    filenamelambda = "575_Lambda_L16.mat"
+    filenamelambda = "610_Lambda_L16.mat"
     mat_fname = pjoin(data_dir,"Calibrations",filenamelambda)
     lam = np.squeeze(sp.io.loadmat(mat_fname)["lambda"])
     
@@ -163,11 +163,25 @@ def main():
     plt.show()
     
     #data binning
-    t,spc,dt = bin_data(spc,t,2)
+    t,spc,dt = bin_data(spc,t,0.1)
+    
+    # cut the time
+    curve = np.squeeze(np.sum(spc, axis=(1,2,3)))
+    val = np.max(curve)
+    pos_max = np.argmax(curve)
+    curve = curve[pos_max:]
+    b = np.argmin(abs(curve - curve[0]*(1-np.exp(-1/5))))
+    # curve=curve[0:b]
+    spc = spc[pos_max:(pos_max+b),:,:,:]
+    t = t[pos_max:(pos_max+b)]
     
     time_dacay = np.sum(spc,axis=(1,2,3))
     plt.plot(t, time_dacay)
-    plt.title('After bin - global spectrum')
+    plt.title('After bin - global time')
+    plt.show()
+    
+    plt.plot(t, np.sum(spc[:,:,12,20],axis=1))
+    plt.title('After bin - time in a point')
     plt.show()
     
     # lam = np.linspace(550,650,16)
@@ -193,10 +207,10 @@ def main():
     plt.title('Initial colored SPC image')
     plt.show()
     
-    plt.plot(lam,np.mean(spc[:,:,10,11],axis=0))
-    plt.plot(lam,np.mean(spc[:,:,16,19],axis=0))
-    plt.title('Initial spectrum specific point')
-    plt.show()
+    # plt.plot(lam,np.mean(spc[:,:,10,11],axis=0))
+    # plt.plot(lam,np.mean(spc[:,:,16,19],axis=0))
+    # plt.title('Initial spectrum specific point')
+    # plt.show()
     
     # plt.plot(spc[:,12,20])
     # plt.title('Initial spectrum small bead')
@@ -245,23 +259,37 @@ def main():
         plt.title('Global spectrum for i-th slice')
         plt.show()
         
-        for i in range(1, zdim, 2):
-            plt.plot(lam, np.mean(x[:, :, i, 125, 147],axis=0), label=f"{i}")
-        plt.legend()
-        plt.tight_layout()
-        plt.title('Specific point spectrum for i-th slice')
-        plt.show()
+        # for i in range(1, zdim, 2):
+        #     plt.plot(lam, np.mean(x[:, :, i, 125, 147],axis=0), label=f"{i}")
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.title('Specific point spectrum for i-th slice')
+        # plt.show()
         
-        for i in range(1, zdim, 2):
-            plt.plot(lam, np.mean(x[:, :, i, 72, 128],axis=0), label=f"{i}")
-        plt.legend()
-        plt.tight_layout()
-        plt.title('Specific point spectrum for i-th slice - no signal')
-        plt.show()
+        # for i in range(1, zdim, 2):
+        #     plt.plot(lam, np.mean(x[:, :, i, 72, 128],axis=0), label=f"{i}")
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.title('Specific point spectrum for i-th slice - no signal')
+        # plt.show()
         
         imageColorSlice = hyperspectral2RGB(lam,np.mean(x[:,:,5,:,:],axis=0))
         plt.imshow(imageColorSlice)
         plt.title('Colored SPC image of one slice')
+        plt.show()
+        
+        for i in range(1, zdim, 2):
+            plt.plot(t, np.mean(x[:, :, i, :, :],axis=(1,2,3)), label=f"{i}")
+        plt.legend()
+        plt.tight_layout()
+        plt.title('Global time for i-th slice')
+        plt.show()
+        
+        for i in range(1, zdim, 2):
+            plt.plot(t, np.sum(x[:,:,i,96,160],axis=1), label=f"{i}")
+        plt.legend()
+        plt.tight_layout()
+        plt.title('Time in a point')
         plt.show()
         
         slicesRGB = hyperspectral2RGBvolume(lam,np.mean(x,axis=0))
