@@ -15,16 +15,23 @@ from bin_data import bin_data
 #     return (x - x.min()) / (x.max() - x.min())
 
 def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
-    x = torch.swapaxes(x, 0, 1)
-    spc = torch.swapaxes(spc, 0, 1) 
-    resizer_256 = transforms.Resize((128, 128), interpolation=transforms.InterpolationMode.BILINEAR)
+    # x = torch.swapaxes(x, 0, 1)   #x->(lam,time,z,x,y)
+    # spc = torch.swapaxes(spc, 0, 1)   #x->(lam,time,x,y)
+    ntime = x.shape[0]
+    nlam = x.shape[1]
+    nz = x.shape[2]
+    nx = x.shape[3]
+    ny = x.shape[4]
+    x = torch.reshape(x, (ntime*nlam, nz, nx, ny))
+    spc = torch.reshape(spc, (spc.shape[0]*spc.shape[1], spc.shape[2], spc.shape[3]))
+    resizer_256 = transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR)
     
     zw = torch.mean(cmos, dim=(1, 2))
     zw /= zw.max()
     
     # Starting point
-    for z in range(x.shape[2]):
-        x[:, :, z, :, :] = resizer_256(spc) * zw[z]
+    for z in range(nz):
+        x[:, z, :, :] = resizer_256(spc) * zw[z]
     
     x = torch.nn.Parameter(x, requires_grad=True)
     optimizer = torch.optim.Adam([x], lr=0.1)
@@ -38,18 +45,18 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
     # spectral_slice_loss = 0
     # global_lambda_fidelity = torch.nn.MSELoss(reduction="mean")
     
-    resizer_32 = torch.nn.AvgPool2d(4, 4)
+    resizer_32 = torch.nn.AvgPool2d(8, 8)
     #resizer_128 = transforms.Resize((128, 128), interpolation=transforms.InterpolationMode.BILINEAR)
 
     for it in range(30):
         optimizer.zero_grad()
         flattened_x = x.flatten()
 
-        resized = torch.cat([resizer_32(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x]) # for each lambda
+        # resized = torch.cat([resizer_32(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x]) # for each lambda I do the mean over z and then I resize to 32x32, final dimension (lambda,time,x,y)
         
-        # spectral_loss = spectral_fidelity(spc.flatten(), resizer_32(torch.mean(x, dim=1)).flatten())
-        spectral_loss = spectral_fidelity(spc.flatten(), resized.flatten())
-        spatial_loss = spatial_fidelity(cmos.flatten(), torch.mean(x, dim=(0,1)).flatten())
+        spectral_loss = spectral_fidelity(spc.flatten(), resizer_32(torch.mean(x, dim=1)).flatten())
+        # spectral_loss = spectral_fidelity(spc.flatten(), resized.flatten())
+        spatial_loss = spatial_fidelity(cmos.flatten(), torch.mean(x, dim=(0)).flatten())
         # intensity_loss = intensity_fidelity(torch.mean(cmos,dim=(1,2)).flatten(), torch.mean(x,dim=(0,2,3)).flatten())
         # spectral_slice_loss = spectral_slice_fidelity(spc.repeat(17,1,1,1).transpose(0,1).flatten(), resizer_32(x).flatten())
         # for i in range(cmos.size(0)):
@@ -57,7 +64,7 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
         # global_lambda_loss =  global_lambda_fidelity(torch.mean(spc, dim=(1, 2)), torch.mean(x, dim=(1,2,3)))
         non_neg_loss = non_neg_fidelity(flattened_x, torch.nn.functional.relu(flattened_x)) 
 
-        loss = spectral_loss + spatial_loss + non_neg_loss # + intensity_loss # intensity_loss
+        loss = spectral_loss + spatial_loss + non_neg_loss # + intensity_loss
 
         loss.backward()
         optimizer.step()
@@ -73,7 +80,8 @@ def optimize(x: torch.tensor, spc, cmos) -> torch.tensor:   #x->(time,lam,z,x,y)
         
         # spectral_slice_loss = 0
 
-    x = torch.swapaxes(x, 0, 1)
+    # x = torch.swapaxes(x, 0, 1)    #go back to x->(time,lam,z,x,y)
+    x = torch.reshape(x, (ntime, nlam, nz, nx, ny))
     return x
 
 def optimize2d(x: torch.tensor, spc, cmos) -> torch.tensor:  #x->(lam,x,y)
@@ -123,7 +131,7 @@ def main():
     with h5py.File(mat_fname, "r") as f:
         mat_contents = h5py.File(mat_fname)
 
-    dimFused = 128
+    dimFused = 256
     # print(list(mat_contents.keys()))
     data = mat_contents['I']
     cmos = np.array(data)
@@ -273,7 +281,7 @@ def main():
         # plt.title('Specific point spectrum for i-th slice - no signal')
         # plt.show()
         
-        imageColorSlice = hyperspectral2RGB(lam,np.mean(x[:,:,5,:,:],axis=0))
+        imageColorSlice = hyperspectral2RGB(lam,np.mean(x[:,:,9,:,:],axis=0))
         plt.imshow(imageColorSlice)
         plt.title('Colored SPC image of one slice')
         plt.show()
@@ -286,7 +294,7 @@ def main():
         plt.show()
         
         for i in range(1, zdim, 2):
-            plt.plot(t, np.sum(x[:,:,i,96,160],axis=1), label=f"{i}")
+            plt.plot(t, np.sum(x[:,:,i,43,80],axis=1), label=f"{i}")
         plt.legend()
         plt.tight_layout()
         plt.title('Time in a point')
