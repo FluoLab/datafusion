@@ -56,7 +56,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
 
     x = torch.nn.Parameter(x, requires_grad=True)
-    optimizer = torch.optim.Adam([x], lr=0.1)
+    optimizer = torch.optim.Adam([x], lr=lr)
 
     down_sampler_kernel_size = int(xy_dim / spc.shape[-1])
     down_sampler = torch.nn.AvgPool2d(down_sampler_kernel_size, down_sampler_kernel_size)
