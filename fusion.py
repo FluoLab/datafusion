@@ -1,8 +1,10 @@
 import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import normalize
 
 import torch
 import torch.nn.functional as f
-
 
 def cosine_loss(
         pred: torch.Tensor, 
@@ -17,7 +19,7 @@ def cosine_loss(
         return cos_sim.sum()
 
 
-def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
+def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1,1), seed=42, lam=0):
     """
     Parameters
     ----------
@@ -31,7 +33,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
         The learning rate to be used for the optimization.
     weights : tuple
         The weights to be used for the loss function. The order is:
-        (spectral_loss, time_loss, spatial_loss, non_neg_loss)
+        (spectral_loss, time_loss, spatial_loss, non_neg_loss, global_map_loss)
     seed : int
         The seed to be used for the random initialization of the data.
 
@@ -60,6 +62,9 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
 
     down_sampler_kernel_size = int(xy_dim / spc.shape[-1])
     down_sampler = torch.nn.AvgPool2d(down_sampler_kernel_size, down_sampler_kernel_size)
+    
+    spectrum_time = torch.mean(spc, dim=(2,3))
+    spectrum_time = spectrum_time/torch.sum(spectrum_time)
 
     for it in range(iterations):
         optimizer.zero_grad()
@@ -79,9 +84,10 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
         
         spatial_loss = weights[2] * f.mse_loss(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
         non_neg_loss = weights[3] * f.mse_loss(x_flat, torch.nn.functional.relu(x_flat))
-        # global_lambda_loss =  weights[4] * f.mse_loss(torch.mean(spc, dim=(2, 3)), torch.mean(x, dim=(2,3,4)))
+        global_map_loss = weights[4] * f.mse_loss(spectrum_time, torch.mean(x, dim=(2,3,4)))
+        # spectral_loss = weights[0] * f.mse_loss(spc.flatten(), resized.flatten())
         
-        loss = spectral_loss + time_loss + spatial_loss + non_neg_loss
+        loss = spectral_loss + time_loss + spatial_loss + non_neg_loss + global_map_loss
 
         loss.backward()
         optimizer.step()
@@ -92,14 +98,16 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1,1,1,1), seed=42):
             f"Time: {time_loss.item():.4F} | "
             f"Spatial: {spatial_loss.item():.4F} | "
             f"Non Neg: {non_neg_loss.item():.4F} | "
-            # f"Global: {global_lambda_loss.item():.4F}"
+            f"Global: {global_map_loss.item():.4F}"
         )
 
     return torch.swapaxes(x, 0, 1)
 
 
 # Comments:
-# - Provare a mettere il termine global map normalizzando i dati su ogni fetta. Quando normalizzo farlo sull'area
+# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine 
+#   loss the global-map term is not needed. This term may be useful in the gradient descent method to keep the loss
+#   convex, since the cosine loss is not convex.
 # - Per inizializzare i dati considerare: 
 #       x = torch.rand(n_times, n_lambdas, z_dim, xy_dim, xy_dim)
 #       up_sampler = transforms.Resize((xy_dim, xy_dim), interpolation=transforms.InterpolationMode.BILINEAR)
