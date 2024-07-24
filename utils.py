@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+
 # from scipy.interpolate import interp1d
 
 FILE_PATH = Path(__file__)
@@ -8,25 +9,25 @@ RESOURCES_PATH = FILE_PATH.parent / "resources"
 
 
 def wavelength_to_color(a):
-    ############## SCALA ALBERTO
-    lambda_vals = np.array([380, 420, 440, 490, 510, 580, 645, 780])
-    r = np.array([97, 106, 0, 0, 0, 255, 255, 97]) / 255
-    g = np.array([0, 0, 0, 255, 255, 255, 0, 0]) / 255
-    b = np.array([97, 255, 255, 255, 0, 0, 0, 0]) / 255
-    ##############
-    
-    # lambda_vals = np.array([547.35972343, 556.56210764, 565.76449186, 574.96687608, 584.1692603,
-    #                     593.37164452, 602.57402874, 611.77641296, 620.97879718, 630.18118139,
-    #                     639.38356561, 648.58594983, 657.78833405, 666.99071827, 676.19310249,
-    #                     685.39548671])
-    # r = np.array([154, 184, 212, 240, 255, 255, 255, 255, 255, 255, 255, 251, 241, 231, 221, 211])/255
-    # g = np.array([255, 255, 255, 255, 241, 212, 181, 149, 114, 78, 35, 30, 30, 30, 30, 30])/255
-    # b = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])/255
-    
+    # SCALA ALBERTO
+    # lambda_vals = np.array([380, 420, 440, 490, 510, 580, 645, 780])
+    # r = np.array([97, 106, 0, 0, 0, 255, 255, 97]) / 255
+    # g = np.array([0, 0, 0, 255, 255, 255, 0, 0]) / 255
+    # b = np.array([97, 255, 255, 255, 0, 0, 0, 0]) / 255
+
+    # SCALA PER OGNI CANALE
+    lambda_vals = np.array([547.35972343, 556.56210764, 565.76449186, 574.96687608, 584.1692603,
+                            593.37164452, 602.57402874, 611.77641296, 620.97879718, 630.18118139,
+                            639.38356561, 648.58594983, 657.78833405, 666.99071827, 676.19310249,
+                            685.39548671])
+    r = np.array([154, 184, 212, 240, 255, 255, 255, 255, 255, 255, 255, 251, 241, 231, 221, 211]) / 255
+    g = np.array([255, 255, 255, 255, 241, 212, 181, 149, 114, 78, 35, 30, 30, 30, 30, 30]) / 255
+    b = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) / 255
+
     r_l = RGB_to_lin(r)
     g_l = RGB_to_lin(g)
     b_l = RGB_to_lin(b)
-    
+
     x = np.interp(a, lambda_vals, r_l)
     y = np.interp(a, lambda_vals, g_l)
     z = np.interp(a, lambda_vals, b_l)
@@ -62,21 +63,21 @@ def hyperspectral2RGB(lambda_vals, im):
     S_g_n = S_g / max_val
     S_b_n = S_b / max_val
 
-    S = np.stack((S_r_n, S_g_n, S_b_n), axis=-1)#.astype(np.uint8)
-    
+    S = np.stack((S_r_n, S_g_n, S_b_n), axis=-1)  # .astype(np.uint8)
+
     for i in range(S.shape[0]):
         for j in range(S.shape[1]):
-            S[i,j] = lin_to_RGB(S[i,j])
-            
-    S = (S*255).astype(np.uint8)
-            
+            S[i, j] = lin_to_RGB(S[i, j])
+
+    S = (S * 255).astype(np.uint8)
+
     return S
 
 
 def hyperspectral2RGBvolume(lambda_vals, im):
     if lambda_vals[0] < 380 or lambda_vals[-1] > 780:
         raise ValueError("Wavelength range out of visible range")
-    
+
     # Values that are less than zero give problems in the spectral visualization
     im[im < 0] = 0
 
@@ -141,18 +142,20 @@ def bin_data(data_nobin, t_nobin, dt):
 
     return t, data, dt
 
+
 def RGB_to_lin(colors):
     for i in range(len(colors)):
-        if (colors[i]<=0.04045):
-            colors[i] = colors[i]/12.92
+        if (colors[i] <= 0.04045):
+            colors[i] = colors[i] / 12.92
         else:
-            colors[i] = np.power((colors[i] + 0.055)/1.055, 2.4)
+            colors[i] = np.power((colors[i] + 0.055) / 1.055, 2.4)
     return colors
+
 
 def lin_to_RGB(colors):
     for color in colors:
         if (color > 0.0031308):
-            color = 1.055 * (np.power(color, 1/2.4)) - 0.055
+            color = 1.055 * (np.power(color, 1 / 2.4)) - 0.055
         else:
             color = 12.92 * color
     return colors

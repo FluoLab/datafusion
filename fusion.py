@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from torchvision.transforms import Resize, InterpolationMode
 
 
 class CosineLoss(torch.nn.Module):
@@ -66,14 +67,16 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
     mse_non_neg = torch.nn.MSELoss().to(device)
     mse_global_map = torch.nn.MSELoss().to(device)
 
-    down_sampler_kernel_size = int(xy_dim / spc.shape[-1])
-    down_sampler = torch.nn.AvgPool2d(down_sampler_kernel_size, down_sampler_kernel_size)
+    down_sampler = Resize(
+        size=(spc.shape[-2], spc.shape[-1]),
+        interpolation=InterpolationMode.BILINEAR,
+        antialias=True,
+    ).to(device)
 
     spectrum_time = torch.mean(spc, dim=(2, 3))
     spectrum_time = spectrum_time / torch.sum(spectrum_time)
 
     for it in range(iterations):
-        x_flat = x.flatten()
         resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
 
         spectral_loss = weights[0] * cosine_spectral(
@@ -87,7 +90,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
         )
 
         spatial_loss = weights[2] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
-        non_neg_loss = weights[3] * mse_non_neg(x_flat, torch.nn.functional.relu(x_flat))
+        non_neg_loss = weights[3] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
         global_map_loss = weights[4] * mse_global_map(spectrum_time, torch.mean(x, dim=(2, 3, 4)))
         # spectral_loss = weights[0] * f.mse_loss(spc.flatten(), resized.flatten())
 
