@@ -162,3 +162,5 @@ cython_debug/
 .idea/
 /resources
 .DS_Store
+*.pdf
+plotThesis.ipynb
