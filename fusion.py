@@ -17,7 +17,7 @@ class CosineLoss(torch.nn.Module):
             return cos_sim.sum()
 
 
-def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="cpu", seed=42):
+def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1, 1), device="cpu", seed=42):
     """
     Parameters
     ----------
@@ -45,6 +45,9 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
 
     spc = torch.from_numpy(spc.astype(np.float32)).to(device)
     cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)
+    
+    # maskcmos = cmos > (0.05 * torch.max(cmos))
+    # cmos = cmos * maskcmos
 
     n_times = spc.shape[0]
     n_lambdas = spc.shape[1]
@@ -56,6 +59,9 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
 
     x = torch.swapaxes(x, 0, 1)  # (lambda,time,z,x,y)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
+    
+    # mask = maskcmos.unsqueeze(0).unsqueeze(0).repeat(n_lambdas, n_times, 1, 1, 1).int().to(device)
+    # mask.requires_grad(True)
 
     x = torch.nn.Parameter(x)
     x.data.requires_grad_(True)
@@ -66,6 +72,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
     mse_spatial = torch.nn.MSELoss().to(device)
     mse_non_neg = torch.nn.MSELoss().to(device)
     mse_global_map = torch.nn.MSELoss().to(device)
+    mse_intensity = torch.nn.MSELoss().to(device)
 
     down_sampler = Resize(
         size=(spc.shape[-2], spc.shape[-1]),
@@ -80,21 +87,23 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
         resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
 
         spectral_loss = weights[0] * cosine_spectral(
-            pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
-            target=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
+            pred=torch.mean(torch.abs(spc), dim=1).view(n_lambdas, -1).T,
+            target=torch.mean(torch.abs(resized), dim=1).view(n_lambdas, -1).T,
         )
 
         time_loss = weights[1] * cosine_time(
-            pred=torch.mean(spc, dim=0).view(n_times, -1).T,
-            target=torch.mean(resized, dim=0).view(n_times, -1).T,
+            pred=torch.mean(torch.abs(spc), dim=0).view(n_times, -1).T,
+            target=torch.mean(torch.abs(resized), dim=0).view(n_times, -1).T,
         )
 
-        spatial_loss = weights[2] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
+        spatial_loss = weights[2] * mse_spatial(torch.abs(cmos.flatten()), torch.mean(torch.abs(x), dim=(0, 1)).flatten())
         non_neg_loss = weights[3] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
         global_map_loss = weights[4] * mse_global_map(spectrum_time, torch.mean(x, dim=(2, 3, 4)))
         # spectral_loss = weights[0] * f.mse_loss(spc.flatten(), resized.flatten())
+        
+        intensity = weights[5] * mse_intensity(torch.mean(cmos, dim=(1,2)), torch.mean(x, dim=(0,1,3,4)))
 
-        loss = spectral_loss + time_loss + spatial_loss + non_neg_loss + global_map_loss
+        loss = spectral_loss + time_loss + spatial_loss + intensity + global_map_loss# + non_neg_loss
 
         loss.backward()
         optimizer.step()
@@ -107,6 +116,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
             f"Spatial: {spatial_loss.item():.4F} | "
             f"Non Neg: {non_neg_loss.item():.4F} | "
             f"Global: {global_map_loss.item():.4F} | "
+            f"Intensity: {intensity.item():.4F} | "
         )
 
     return torch.swapaxes(x, 0, 1).detach().cpu().numpy()
