@@ -1,6 +1,8 @@
 import torch
 import numpy as np
+import torchvision.transforms.functional as F
 from torchvision.transforms import Resize, InterpolationMode
+import matplotlib.pyplot as plt
 
 
 class CosineLoss(torch.nn.Module):
@@ -45,11 +47,20 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
 
     spc = torch.from_numpy(spc.astype(np.float32)).to(device)
     cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)
+    
+    maskCMOS = cmos > (0.05 * torch.max(cmos))
+    cmos = cmos * maskCMOS
+    
+    maskSPC = F.resize(torch.sum(maskCMOS, dim=0).unsqueeze(0), size=(spc.shape[-2], spc.shape[-1]), interpolation=InterpolationMode.BILINEAR, antialias=False)
 
     n_times = spc.shape[0]
     n_lambdas = spc.shape[1]
     xy_dim = cmos.shape[1]
     z_dim = cmos.shape[0]
+    
+    maskSPC = maskSPC.unsqueeze(0).repeat(n_times, n_lambdas, 1, 1)
+    maskSPCbool = maskSPC >= 1
+    spc = spc * maskSPCbool
 
     torch.manual_seed(seed)
     x = torch.rand(n_times, n_lambdas, z_dim, xy_dim, xy_dim).to(device)
@@ -66,7 +77,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
     mse_spatial = torch.nn.MSELoss().to(device)
     mse_non_neg = torch.nn.MSELoss().to(device)
     mse_global_map = torch.nn.MSELoss().to(device)
-
+    
     down_sampler = Resize(
         size=(spc.shape[-2], spc.shape[-1]),
         interpolation=InterpolationMode.BILINEAR,
@@ -77,7 +88,7 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
     spectrum_time = spectrum_time / torch.sum(spectrum_time)
 
     for it in range(iterations):
-        resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
+        resized = torch.cat([down_sampler(torch.mean(torch.abs(xi), dim=1)).unsqueeze(0) for xi in x])
 
         spectral_loss = weights[0] * cosine_spectral(
             pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
@@ -89,12 +100,12 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
             target=torch.mean(resized, dim=0).view(n_times, -1).T,
         )
 
-        spatial_loss = weights[2] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
+        spatial_loss = weights[2] * mse_spatial(cmos.flatten(), torch.mean(torch.abs(x), dim=(0, 1)).flatten())
         non_neg_loss = weights[3] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
-        global_map_loss = weights[4] * mse_global_map(spectrum_time, torch.mean(x, dim=(2, 3, 4)))
+        global_map_loss = weights[4] * mse_global_map(spectrum_time, torch.mean(torch.abs(x), dim=(2, 3, 4)))
         # spectral_loss = weights[0] * f.mse_loss(spc.flatten(), resized.flatten())
 
-        loss = spectral_loss + time_loss + spatial_loss + non_neg_loss + global_map_loss
+        loss = spectral_loss + time_loss + spatial_loss + global_map_loss + non_neg_loss
 
         loss.backward()
         optimizer.step()
