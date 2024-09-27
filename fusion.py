@@ -107,19 +107,23 @@ def optimize(
     z_dim = cmos.shape[0]
     x_shape = (n_lambdas, n_times, z_dim, xy_dim, xy_dim)
 
-    if mask_noise:
-        cmos_mask, spc_mask = get_masks(cmos, spc)
-        cmos = cmos * cmos_mask.float()
-        spc = spc * spc_mask.float()
-
     # Initialization
     torch.manual_seed(seed)
     if init_type == "random":
         x = torch.rand(x_shape).to(device)
     elif init_type == "zeros":
         x = torch.zeros(x_shape).to(device)
+    elif init_type == "baseline":
+        from baseline import baseline
+        x = torch.from_numpy(baseline(cmos, spc, device))
     else:
         raise ValueError("Invalid initialization type.")
+
+    if mask_noise:
+        cmos_mask, spc_mask = get_masks(cmos, spc)
+        cmos = cmos * cmos_mask.float()
+        spc = spc * spc_mask.float()
+        x[:, :, ~cmos_mask] = 0.0
 
     x = torch.nn.Parameter(x, requires_grad=True)
     optimizer = torch.optim.Adam([x], lr=lr)
@@ -135,11 +139,6 @@ def optimize(
     ).to(device)
 
     for it in range(iterations):
-
-        if mask_noise:
-            with torch.no_grad():
-                x[:, :, ~cmos_mask] = 0
-
         resized = torch.cat([down_sampler(torch.mean(torch.abs(xi), dim=1)).unsqueeze(0) for xi in x])
 
         spectral_time_loss = weights[0] * cosine_spectral_time(
@@ -153,6 +152,10 @@ def optimize(
         loss = spectral_time_loss + spatial_loss + non_neg_loss
 
         loss.backward()
+
+        if mask_noise:
+            x.grad[:, :, ~cmos_mask] = 0.0
+
         optimizer.step()
         optimizer.zero_grad()
 

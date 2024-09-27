@@ -5,7 +5,7 @@ from torchvision.transforms import Resize, InterpolationMode
 from tqdm import tqdm
 
 
-def baseline(cmos, spc, device):
+def baseline(cmos, spc, device, return_numpy=True):
     # Idea: Use bilinear interpolation for SPC and then multiply by CMOS for each z.
 
     # for each time:
@@ -14,8 +14,11 @@ def baseline(cmos, spc, device):
     #           interpolate spc to z
     #           multiply spc by cmos[z]
 
-    spc = torch.from_numpy(spc.astype(np.float32)).to(device)  # (time,lambda,x,y)
-    cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)  # (z,x,y)
+    if isinstance(spc, np.ndarray):
+        spc = torch.from_numpy(spc.astype(np.float32)).to(device)  # (time,lambda,x,y)
+
+    if isinstance(cmos, np.ndarray):
+        cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)  # (z,x,y)
 
     n_times = spc.shape[0]
     n_lambdas = spc.shape[1]
@@ -34,4 +37,4 @@ def baseline(cmos, spc, device):
         for z in range(cmos.shape[0]):
             x[time, :, z, :, :] = upsampler(spc[time, :, :, :]) * cmos[z, :, :]
 
-    return x.cpu().detach().numpy()
+    return x.cpu().detach().numpy() if return_numpy else x
