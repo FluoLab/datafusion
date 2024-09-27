@@ -134,9 +134,6 @@ def optimize(
         antialias=True,
     ).to(device)
 
-    # spectrum_time = torch.mean(spc, dim=(2, 3))
-    # spectrum_time = spectrum_time / torch.sum(spectrum_time)
-
     for it in range(iterations):
 
         if mask_noise:

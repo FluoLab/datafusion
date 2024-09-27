@@ -34,4 +34,4 @@ def baseline(cmos, spc, device):
         for z in range(cmos.shape[0]):
             x[time, :, z, :, :] = upsampler(spc[time, :, :, :]) * cmos[z, :, :]
 
-    return x
+    return x.cpu().detach().numpy()
