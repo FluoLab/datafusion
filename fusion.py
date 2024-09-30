@@ -1,49 +1,11 @@
 import torch
 import numpy as np
 import torchvision.transforms.functional as f
+
+from tqdm import tqdm
 from torchvision.transforms import Resize, InterpolationMode
 
-
-class CosineLoss(torch.nn.Module):
-    def __init__(self, dim=1, reduction="mean"):
-        super(CosineLoss, self).__init__()
-        self.dim = dim
-        self.reduction = reduction
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> float:
-        cos_sim = 1 - torch.nn.functional.cosine_similarity(pred, target, dim=self.dim)
-        if self.reduction == "mean":
-            return cos_sim.mean()
-        else:
-            return cos_sim.sum()
-
-
-class MatrixCosineLoss(torch.nn.Module):
-    def __init__(self, dim=0, reduction="mean"):
-        super(MatrixCosineLoss, self).__init__()
-        self.dim = dim
-        self.reduction = reduction
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> float:
-        # Element-wise product and then take the sum
-        dot_product = torch.sum(pred * target, dim=(-2, -1))
-
-        # Frobenius norms of both matrices
-        norm_pred = torch.linalg.matrix_norm(pred, ord="fro")
-        norm_target = torch.linalg.matrix_norm(target, ord="fro")
-
-        # Prevent division by zero
-        norm_pred = torch.where(norm_pred == 0, torch.ones_like(norm_pred), norm_pred)
-        norm_target = torch.where(norm_target == 0, torch.ones_like(norm_target), norm_target)
-
-        # Compute matrix-level cosine similarity
-        cos_sim_matrix = dot_product / (norm_pred * norm_target)
-
-        cos_sim_matrix = 1 - cos_sim_matrix
-        if self.reduction == "mean":
-            return cos_sim_matrix.mean(self.dim)
-        else:
-            return cos_sim_matrix.sum(self.dim)
+from losses import CosineLoss, MatrixCosineLoss
 
 
 def get_masks(cmos, spc):
@@ -60,13 +22,14 @@ def get_masks(cmos, spc):
 def optimize(
         spc,
         cmos,
+        weights,
         iterations=30,
         lr=0.1,
-        weights=(1, 1, 1),
         init_type="random",
         mask_noise=False,
         device="cpu",
-        seed=42
+        seed=42,
+        return_numpy=True,
 ):
     """
     Parameters
@@ -79,9 +42,8 @@ def optimize(
         The number of iterations to run the optimization.
     lr : float
         The learning rate to be used for the optimization.
-    weights : tuple
-        The weights to be used for the loss function. The order is:
-        (spectral_loss, time_loss, spatial_loss, non_neg_loss, global_map_loss)
+    weights : dict
+        The weights to be used for the loss function.
     init_type : str
         The initialization type to be used for the parameters to be optimized.
     mask_noise : bool
@@ -90,12 +52,17 @@ def optimize(
         The device to be used for the optimization.
     seed : int
         The seed to be used for the random initialization of the data.
+    return_numpy : bool
+        Whether to return the optimized data as a numpy array or as a tensor.
 
     Returns
     -------
     torch.Tensor
         The optimized spectral cube.
     """
+
+    # TODO: clean the logic of the code
+    # TODO: fix readability of the code
 
     spc = torch.from_numpy(spc.astype(np.float32)).to(device)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
@@ -107,10 +74,12 @@ def optimize(
     z_dim = cmos.shape[0]
     x_shape = (n_lambdas, n_times, z_dim, xy_dim, xy_dim)
 
-    # Initialization
+    # Initialization of the parameters
     torch.manual_seed(seed)
     if init_type == "random":
         x = torch.rand(x_shape).to(device)
+    elif init_type == "normal":
+        x = torch.empty(x_shape).normal_(0.5, 0.3).to(device)
     elif init_type == "zeros":
         x = torch.zeros(x_shape).to(device)
     elif init_type == "baseline":
@@ -128,45 +97,88 @@ def optimize(
     x = torch.nn.Parameter(x, requires_grad=True)
     optimizer = torch.optim.Adam([x], lr=lr)
 
-    cosine_spectral_time = MatrixCosineLoss().to(device)
+    # Initialization of losses
+    if weights["spectral_time"] > 0:
+        cosine_spectral_time = MatrixCosineLoss().to(device)
+    else:
+        cosine_spectral = CosineLoss().to(device)
+        cosine_time = CosineLoss().to(device)
+
     mse_spatial = torch.nn.MSELoss().to(device)
     mse_non_neg = torch.nn.MSELoss().to(device)
 
+    # Down-sampler to resize the cmos xy dimensions to the xy dimensions of the spc
     down_sampler = Resize(
         size=(spc.shape[-2], spc.shape[-1]),
         interpolation=InterpolationMode.BILINEAR,
         antialias=True,
     ).to(device)
 
-    for it in range(iterations):
+    for _ in (progress_bar := tqdm(range(iterations))):
+        # TODO: add termination condition based on convergence
         resized = torch.cat([down_sampler(torch.mean(torch.abs(xi), dim=1)).unsqueeze(0) for xi in x])
 
-        spectral_time_loss = weights[0] * cosine_spectral_time(
-            pred=torch.swapdims(spc.reshape(n_lambdas, n_times, -1), 0, -1),
-            target=torch.swapdims(resized.reshape(n_lambdas, n_times, -1), 0, -1),
-        )
+        # Computing losses
+        spatial_loss = weights["spatial"] * mse_spatial(cmos.flatten(), torch.mean(torch.abs(x), dim=(0, 1)).flatten())
+        non_neg_loss = weights["non_neg"] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
 
-        spatial_loss = weights[1] * mse_spatial(cmos.flatten(), torch.mean(torch.abs(x), dim=(0, 1)).flatten())
-        non_neg_loss = weights[2] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
+        if weights["spectral_time"] > 0:
+            spectral_time_loss = weights["spectral_time"] * cosine_spectral_time(
+                pred=torch.swapdims(spc.reshape(n_lambdas, n_times, -1), 0, -1),
+                target=torch.swapdims(resized.reshape(n_lambdas, n_times, -1), 0, -1),
+            )
+            loss = spectral_time_loss + spatial_loss + non_neg_loss
+            log = (
+                f"SpectralTime: {spectral_time_loss.item():.4F} | "
+                f"Spatial: {spatial_loss.item():.4F} | "
+                f"Non Neg: {non_neg_loss.item():.4F} | "
+            )
 
-        loss = spectral_time_loss + spatial_loss + non_neg_loss
+        else:
+            spectral_loss = weights["spectral"] * cosine_spectral(
+                pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
+                target=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
+            )
+
+            time_loss = weights["time"] * cosine_time(
+                pred=torch.mean(spc, dim=0).view(n_times, -1).T,
+                target=torch.mean(resized, dim=0).view(n_times, -1).T,
+            )
+
+            loss = spectral_loss + time_loss + spatial_loss + non_neg_loss
+            log = (
+                f"Spectral: {spectral_loss.item():.4F} | "
+                f"Time: {time_loss.item():.4F} | "
+                f"Spatial: {spatial_loss.item():.4F} | "
+                f"Non Neg: {non_neg_loss.item():.4F} | "
+            )
 
         loss.backward()
-
         if mask_noise:
             x.grad[:, :, ~cmos_mask] = 0.0
-
         optimizer.step()
         optimizer.zero_grad()
+        progress_bar.set_description(log)
 
-        print(
-            f"Iteration {it + 1} | "
-            f"SpectralTime: {spectral_time_loss.item():.4F} | "
-            f"Spatial: {spatial_loss.item():.4F} | "
-            f"Non Neg: {non_neg_loss.item():.4F} | "
-        )
+    x = torch.swapaxes(x, 0, 1)
+    return x.detach().cpu().numpy() if return_numpy else x
 
-    return torch.swapaxes(x, 0, 1).detach().cpu().numpy()
+
+def optimization_with_decay_regression():
+    # Idea:
+    #       -- Use the optimization method to also find the decay of the exponential decay model.
+
+    #       -- I_0 * e^(-t / tau_0) + I_1 * e^(-t / tau_1) +  ... + I_n * e^(-t / tau_n)
+
+    #       -- The coefficients (I_0, tau_0, ...) are now the elements in the x tensor for the time dimension.
+
+    #       -- To jointly optimize x and perform regression on the decay parameters we can change the time loss to MSE
+    #          between the spc and the resized version of x.
+
+    #       -- The decay parameters have to be carefully integrated now in a separate resize though.
+
+    #       -- TODO: Think about how to integrate the decay parameters in the optimization.
+    pass
 
 # Comments:
 
@@ -183,13 +195,3 @@ def optimize(
 #       for zi in range(x.shape[2]):
 #           x[:, :, zi, :, :] = up_sampler(spc) * weights_z[zi]
 #
-# - To move back to summing one loss for the time and one for the spectrum, consider this code snippet:
-#       spectral_loss = weights[0] * cosine_spectral(
-#           pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
-#           target=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
-#       )
-#
-#       time_loss = weights[1] * cosine_time(
-#           pred=torch.mean(spc, dim=0).view(n_times, -1).T,
-#           target=torch.mean(resized, dim=0).view(n_times, -1).T,
-#       )

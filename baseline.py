@@ -33,6 +33,8 @@ def baseline(cmos, spc, device, return_numpy=True):
         antialias=True,
     ).to(device)
 
+    cmos = cmos / cmos.sum(dim=0, keepdim=True)
+
     for time in tqdm(range(spc.shape[0])):
         for z in range(cmos.shape[0]):
             x[time, :, z, :, :] = upsampler(spc[time, :, :, :]) * cmos[z, :, :]
