@@ -67,9 +67,12 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
 
     x = torch.swapaxes(x, 0, 1)  # (lambda,time,z,x,y)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
+    
+    maskX = maskCMOS.unsqueeze(0).unsqueeze(0).repeat(n_lambdas, n_times, 1, 1, 1)
 
     x = torch.nn.Parameter(x)
-    x.data.requires_grad_(True)
+    x[not maskX].data.requires_grad_(True)
+    x[maskX].data.requires_grad_(False)
     optimizer = torch.optim.Adam([x], lr=lr)
 
     cosine_spectral = CosineLoss().to(device)
