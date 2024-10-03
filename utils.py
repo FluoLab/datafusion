@@ -1,11 +1,41 @@
 from pathlib import Path
 
+import torch
 import numpy as np
+from tqdm import tqdm
 
 # from scipy.interpolate import interp1d
 
 FILE_PATH = Path(__file__)
 RESOURCES_PATH = FILE_PATH.parent / "resources"
+
+
+def decay_model(I, tau, t):
+    return torch.sum(torch.cat([(I[i] * torch.exp(-t / tau[i])).unsqueeze(0) for i in range(len(I))]), dim=0)
+
+
+def get_discrete_time_decay(tensor, t, cmos_mask):
+    discrete_tensor = torch.zeros(len(t), tensor.shape[1], tensor.shape[2], tensor.shape[3], tensor.shape[4])
+    indices = cmos_mask.nonzero(as_tuple=True)
+
+    for l in tqdm(range(tensor.shape[1])):
+        # Use the mask to avoid computing the decay for pixels that are not in the mask
+        for z, x, y in zip(*indices):
+            discrete_tensor[:, l, z, x, y] = decay_model(
+                tensor[:, l, z, x, y][::2],
+                tensor[:, l, z, x, y][1::2],
+                t
+            )
+        # for z in range(tensor.shape[2]):
+        #     for x in range(tensor.shape[3]):
+        #         for y in range(tensor.shape[4]):
+        #             discrete_tensor[:, l, z, x, y] = decay_model(
+        #                 tensor[:, l, z, x, y][::3],
+        #                 tensor[:, l, z, x, y][1::3],
+        #                 t
+        #             )
+
+    return discrete_tensor
 
 
 def wavelength_to_color(a):

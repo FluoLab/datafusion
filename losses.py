@@ -1,5 +1,17 @@
 import torch
 
+from utils import decay_model
+
+
+class DecayLoss(torch.nn.Module):
+    def __init__(self, t):
+        super(DecayLoss, self).__init__()
+        self.t = torch.from_numpy(t).float()
+
+    def forward(self, pred_coeffs: torch.Tensor, target: torch.Tensor):
+        pred = torch.cat([decay_model(coeffs[::2], coeffs[1::2], self.t).unsqueeze(0) for coeffs in pred_coeffs])
+        return torch.nn.functional.mse_loss(pred, target)
+
 
 class CosineLoss(torch.nn.Module):
     def __init__(self, dim=1, reduction="mean"):
