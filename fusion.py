@@ -13,12 +13,33 @@ def _initialize(spc, cmos, x_shape, init_type, device, seed):
     if init_type == "random":
         x = torch.rand(x_shape).to(device)
     elif init_type == "normal":
-        x = torch.empty(x_shape).normal_(0.1, 0.05).to(device)
+        x = torch.empty(x_shape).normal_(0.5, 0.1).to(device)
     elif init_type == "zeros":
         x = torch.zeros(x_shape).to(device)
     elif init_type == "baseline":
         from baseline import baseline
         x = baseline(cmos, spc, device, return_numpy=False)
+    else:
+        raise ValueError("Invalid initialization type.")
+    return x
+
+
+def _initialize_continuous_time(x_shape, init_type, device, seed):
+    torch.manual_seed(seed)
+    if init_type == "random":
+        x = torch.rand(x_shape).to(device)
+    elif init_type == "normal":
+        x = torch.empty(x_shape).normal_(0.5, 0.01).to(device)
+    elif init_type == "fixed":
+        x = torch.zeros(x_shape).to(device)
+        x[:, 0, :, :, :] = 0.5
+        x[:, 1, :, :, :] = 2.0
+        x[:, 2, :, :, :] = 0.01
+        # Add some noise to the initialization
+        x[:, 0, :, :, :] += torch.empty(x[:, 0, :, :, :].shape).normal_(0.0, 0.1).to(device)
+        x[:, 1, :, :, :] += torch.empty(x[:, 1, :, :, :].shape).normal_(0.0, 1.0).to(device)
+        x[:, 2, :, :, :] += torch.empty(x[:, 2, :, :, :].shape).normal_(0.0, 0.01).to(device)
+
     else:
         raise ValueError("Invalid initialization type.")
     return x
@@ -132,8 +153,9 @@ def optimize(
     ).to(device)
 
     for _ in (progress_bar := tqdm(range(iterations))):
+        optimizer.zero_grad()
         # TODO: add termination condition based on convergence
-        resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
+        resized_x = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
 
         # Computing losses
         spatial_loss = weights["spatial"] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
@@ -141,7 +163,7 @@ def optimize(
         if weights["spectral_time"] > 0:
             spectral_time_loss = weights["spectral_time"] * cosine_spectral_time(
                 pred=torch.swapdims(spc.reshape(n_lambdas, n_times, -1), 0, -1),
-                target=torch.swapdims(resized.reshape(n_lambdas, n_times, -1), 0, -1),
+                target=torch.swapdims(resized_x.reshape(n_lambdas, n_times, -1), 0, -1),
             )
             loss = spectral_time_loss + spatial_loss
             log = (
@@ -152,12 +174,12 @@ def optimize(
         else:
             spectral_loss = weights["spectral"] * cosine_spectral(
                 pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
-                target=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
+                target=torch.mean(resized_x, dim=1).view(n_lambdas, -1).T,
             )
 
             time_loss = weights["time"] * cosine_time(
                 pred=torch.mean(spc, dim=0).view(n_times, -1).T,
-                target=torch.mean(resized, dim=0).view(n_times, -1).T,
+                target=torch.mean(resized_x, dim=0).view(n_times, -1).T,
             )
 
             loss = spatial_loss + spectral_loss + time_loss
@@ -178,7 +200,6 @@ def optimize(
             with torch.no_grad():
                 x.data.clamp_(min=0.0)
 
-        optimizer.zero_grad()
         progress_bar.set_description(log)
 
     x = torch.swapaxes(x, 0, 1)
@@ -223,10 +244,10 @@ def optimize_with_continuous_time(
     n_times = spc.shape[1]
     xy_dim = cmos.shape[1]
     z_dim = cmos.shape[0]
-    x_shape = (n_lambdas, 2 * n_decays, z_dim, xy_dim, xy_dim)
+    x_shape = (n_lambdas, 3 * n_decays, z_dim, xy_dim, xy_dim)
 
     # Initialization of the parameters
-    x = _initialize(spc, cmos, x_shape, init_type, device, seed)
+    x = _initialize_continuous_time(x_shape, init_type, device, seed)
     spc_mask, cmos_mask = _get_masks(spc, cmos)
     if mask_initializations:
         spc, cmos, x = _mask_initializations(x, spc, cmos, spc_mask, cmos_mask)
@@ -247,16 +268,17 @@ def optimize_with_continuous_time(
     ).to(device)
 
     for _ in (progress_bar := tqdm(range(iterations))):
-        resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
+        optimizer.zero_grad()
+        resized_x = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
 
         spatial_loss = weights["spatial"] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
         spectral_loss = weights["spectral"] * cosine_spectral(
-            pred=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
+            pred=torch.mean(resized_x, dim=1).view(n_lambdas, -1).T,
             target=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
         )
 
         time_loss = weights["time"] * mse_decay(
-            pred_coeffs=torch.mean(resized, dim=0).view(2 * n_decays, -1).T,
+            pred_coeffs=torch.mean(resized_x, dim=0).view(3 * n_decays, -1).T,
             target=torch.mean(spc, dim=0).view(n_times, -1).T,
         )
 
@@ -279,7 +301,12 @@ def optimize_with_continuous_time(
             with torch.no_grad():
                 x.data.clamp_(min=0.0)
 
-        optimizer.zero_grad()
+        with torch.no_grad():
+            # Clamp I to max 1.0
+            x.data[:, 0, :, :, :].clamp_(max=1.0)
+            # Clamp c to max 0.1
+            x.data[:, 2, :, :, :].clamp_(max=0.1)
+
         progress_bar.set_description(log)
 
     x = torch.swapaxes(x, 0, 1)

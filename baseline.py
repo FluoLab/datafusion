@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 
 def baseline(cmos, spc, device, return_numpy=True):
-    # Idea: Use bilinear interpolation for SPC and then multiply by CMOS for each z.
+    # Idea: Use bilinear interpolation for SPC and then multiply by normalized CMOS for each z.
 
     # for each time:
     #   for each lambda:
@@ -37,7 +37,6 @@ def baseline(cmos, spc, device, return_numpy=True):
 
     for time in tqdm(range(spc.shape[0])):
         for z in range(cmos.shape[0]):
-            # moltiplicare l'integrale del tempo per la cmos
             x[time, :, z, :, :] = upsampler(spc[time, :, :, :]) * cmos[z, :, :]
 
     return x.cpu().detach().numpy() if return_numpy else x

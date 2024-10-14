@@ -1,6 +1,6 @@
 import torch
 
-from utils import decay_model
+from utils import mono_exponential_decay
 
 
 class DecayLoss(torch.nn.Module):
@@ -9,8 +9,9 @@ class DecayLoss(torch.nn.Module):
         self.t = torch.from_numpy(t).float()
 
     def forward(self, pred_coeffs: torch.Tensor, target: torch.Tensor):
-        pred = torch.cat([decay_model(coeffs[::2], coeffs[1::2], self.t).unsqueeze(0) for coeffs in pred_coeffs])
-        return torch.nn.functional.mse_loss(pred, target)
+        pred_coeffs = pred_coeffs.T
+        pred = mono_exponential_decay(pred_coeffs[0], pred_coeffs[1], pred_coeffs[2], self.t)
+        return torch.nn.functional.mse_loss(pred.T, target)
 
 
 class CosineLoss(torch.nn.Module):
