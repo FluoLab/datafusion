@@ -1,24 +1,30 @@
 import torch
 import numpy as np
-import torchvision.transforms.functional as f
-
 from tqdm import tqdm
 from torchvision.transforms import Resize, InterpolationMode
+from torchvision.transforms.functional import resize
 
-from losses import CosineLoss, MatrixCosineLoss, DecayLoss
+
+from losses import CosineLoss, DecayLoss
 
 
 def _initialize(spc, cmos, x_shape, init_type, device, seed):
     torch.manual_seed(seed)
     if init_type == "random":
-        x = torch.rand(x_shape).to(device)
-    elif init_type == "normal":
-        x = torch.empty(x_shape).normal_(0.5, 0.1).to(device)
+        x = (cmos.min() - cmos.max()) * torch.rand(x_shape) + cmos.max()
     elif init_type == "zeros":
         x = torch.zeros(x_shape).to(device)
     elif init_type == "baseline":
         from baseline import baseline
+
         x = baseline(cmos, spc, device, return_numpy=False)
+    elif init_type == "upsampled_spc":
+        upsampler = Resize(
+            size=(cmos.shape[-2], cmos.shape[-1]),
+            interpolation=InterpolationMode.NEAREST,
+        ).to(device)
+        x = upsampler(spc).unsqueeze(2).repeat(1, 1, cmos.shape[0], 1, 1)
+        x = x / x.sum()
     else:
         raise ValueError("Invalid initialization type.")
     return x
@@ -27,18 +33,30 @@ def _initialize(spc, cmos, x_shape, init_type, device, seed):
 def _initialize_continuous_time(x_shape, init_type, device, seed):
     torch.manual_seed(seed)
     if init_type == "random":
-        x = torch.rand(x_shape).to(device)
+        x = torch.zeros(x_shape).to(device)
+        x[:, 0, :, :, :] = (0.1 - 0.9) * torch.rand_like(x[:, 0, :, :, :]) + 0.9
+        x[:, 1, :, :, :] = (0.1 - 5.0) * torch.rand_like(x[:, 1, :, :, :]) + 5.0
+        x[:, 2, :, :, :] = (0.0001 - 0.01) * torch.rand_like(x[:, 1, :, :, :]) + 0.01
     elif init_type == "normal":
         x = torch.empty(x_shape).normal_(0.5, 0.01).to(device)
     elif init_type == "fixed":
-        x = torch.zeros(x_shape).to(device)
+        x = torch.zeros(x_shape, dtype=torch.float32).to(device)
         x[:, 0, :, :, :] = 0.5
-        x[:, 1, :, :, :] = 2.0
-        x[:, 2, :, :, :] = 0.01
+        x[:, 1, :, :, :] = 2.5
+        x[:, 2, :, :, :] = 0.0045
         # Add some noise to the initialization
-        x[:, 0, :, :, :] += torch.empty(x[:, 0, :, :, :].shape).normal_(0.0, 0.1).to(device)
-        x[:, 1, :, :, :] += torch.empty(x[:, 1, :, :, :].shape).normal_(0.0, 1.0).to(device)
-        x[:, 2, :, :, :] += torch.empty(x[:, 2, :, :, :].shape).normal_(0.0, 0.01).to(device)
+        x[:, 0, :, :, :] += (
+            torch.empty(x[:, 0, :, :, :].shape).normal_(0.0, 0.1).to(device)
+        )
+        x[:, 0, :, :, :] = x[:, 0, :, :, :].clamp(min=0.01, max=0.99)
+        x[:, 1, :, :, :] += (
+            torch.empty(x[:, 1, :, :, :].shape).normal_(0.0, 1.0).to(device)
+        )
+        x[:, 1, :, :, :] = x[:, 1, :, :, :].clamp(min=0.01, max=5.0)
+        x[:, 2, :, :, :] += (
+            torch.empty(x[:, 2, :, :, :].shape).normal_(0.0, 0.001).to(device)
+        )
+        x[:, 2, :, :, :] = x[:, 2, :, :, :].clamp(min=0.001, max=0.009)
 
     else:
         raise ValueError("Invalid initialization type.")
@@ -58,7 +76,7 @@ def _mask_gradients(x, cmos_mask):
 
 def _get_masks(spc, cmos):
     cmos_mask = cmos > (0.05 * cmos.max())
-    spc_mask = f.resize(
+    spc_mask = resize(
         cmos_mask.any(dim=0).unsqueeze(0).float(),
         size=[spc.shape[-2], spc.shape[-1]],
         interpolation=InterpolationMode.BILINEAR,
@@ -68,59 +86,24 @@ def _get_masks(spc, cmos):
 
 
 def optimize(
-        spc,
-        cmos,
-        weights,
-        iterations=30,
-        lr=0.1,
-        init_type="random",
-        mask_initializations=False,
-        mask_gradients=False,
-        non_neg=False,
-        device="cpu",
-        seed=42,
-        return_numpy=True,
+    spc,
+    cmos,
+    weights,
+    iterations=30,
+    lr=0.1,
+    init_type="random",
+    mask_initializations=False,
+    mask_gradients=False,
+    non_neg=False,
+    device="cpu",
+    seed=42,
+    return_numpy=True,
 ):
-    """
-    Parameters
-    ----------
-    spc : np.ndarray
-        The spectral cube to be used for the optimization. (time,lambda,x,y)
-    cmos : np.ndarray
-        The CMOS data to be used for the optimization. (z,x,y)
-    iterations : int
-        The number of iterations to run the optimization.
-    lr : float
-        The learning rate to be used for the optimization.
-    weights : dict
-        The weights to be used for the loss function.
-    init_type : str
-        The initialization type to be used for the parameters to be optimized.
-    mask_initializations : bool
-        Whether to mask the initializations of the parameters.
-    mask_gradients : bool
-        Whether to mask the gradients of the parameters.
-    non_neg : bool
-        Whether to enforce non-negativity on the parameters.
-    device : str
-        The device to be used for the optimization.
-    seed : int
-        The seed to be used for the random initialization of the data.
-    return_numpy : bool
-        Whether to return the optimized data as a numpy array or as a tensor.
+    torch.set_default_dtype(torch.DoubleTensor)
 
-    Returns
-    -------
-    torch.Tensor
-        The optimized spectral cube.
-    """
-
-    # TODO: clean the logic of the code
-    # TODO: fix readability of the code
-
-    spc = torch.from_numpy(spc.astype(np.float32)).to(device)
+    spc = torch.from_numpy(spc.astype(np.float64)).to(device)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
-    cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)  # (z,x,y)
+    cmos = torch.from_numpy(cmos.astype(np.float64)).to(device)  # (z,x,y)
 
     n_lambdas = spc.shape[0]
     n_times = spc.shape[1]
@@ -135,59 +118,67 @@ def optimize(
         spc, cmos, x = _mask_initializations(x, spc, cmos, spc_mask, cmos_mask)
     x = torch.nn.Parameter(x, requires_grad=True)
 
-    optimizer = torch.optim.Adam([x], lr=lr)
+    optimizer = torch.optim.NAdam([x], lr=lr)
 
     # Initialization of losses
     mse_spatial = torch.nn.MSELoss().to(device)
-    if weights["spectral_time"] > 0:
-        cosine_spectral_time = MatrixCosineLoss().to(device)
-    else:
-        cosine_spectral = CosineLoss().to(device)
-        cosine_time = CosineLoss().to(device)
+    mse_lambda_time = torch.nn.MSELoss().to(device)
+    mse_global = torch.nn.MSELoss().to(device)
 
-    # Down-sampler to resize the cmos xy dimensions to the xy dimensions of the spc
-    down_sampler = Resize(
-        size=(spc.shape[-2], spc.shape[-1]),
-        interpolation=InterpolationMode.BILINEAR,
-        antialias=True,
-    ).to(device)
+    down_sampler = torch.nn.LPPool2d(1, (4, 4), (4, 4))
+
+    # down_sampler = Resize(
+    #     size=(spc.shape[-2], spc.shape[-1]),
+    #     interpolation=InterpolationMode.BILINEAR,
+    #     antialias=True,
+    # ).to(device)
+
+    # up_sampler = Resize(
+    #     size=(xy_dim, xy_dim),
+    #     interpolation=InterpolationMode.BILINEAR,
+    #     antialias=True,
+    # ).to(device)
+    #
+    # up_sampled_spc = up_sampler(spc)
 
     for _ in (progress_bar := tqdm(range(iterations))):
         optimizer.zero_grad()
         # TODO: add termination condition based on convergence
-        resized_x = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
+        resized_x = torch.cat(
+            [down_sampler(torch.sum(xi, dim=1)).unsqueeze(0) for xi in x]
+        )
 
         # Computing losses
-        spatial_loss = weights["spatial"] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
+        spatial_loss = weights["spatial"] * mse_spatial(
+            cmos.flatten(), torch.sum(x, dim=(0, 1)).flatten()
+        )
 
-        if weights["spectral_time"] > 0:
-            spectral_time_loss = weights["spectral_time"] * cosine_spectral_time(
-                pred=torch.swapdims(spc.reshape(n_lambdas, n_times, -1), 0, -1),
-                target=torch.swapdims(resized_x.reshape(n_lambdas, n_times, -1), 0, -1),
-            )
-            loss = spectral_time_loss + spatial_loss
-            log = (
-                f"Spatial: {spatial_loss.item():.4F} | "
-                f"SpectralTime: {spectral_time_loss.item():.4F} | "
-            )
+        # spectral_loss = weights["spectral"] * cosine_spectral(
+        #     pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
+        #     target=torch.mean(resized_x, dim=1).view(n_lambdas, -1).T,
+        # )
+        #
+        # time_loss = weights["time"] * cosine_time(
+        #     pred=torch.mean(spc, dim=0).view(n_times, -1).T,
+        #     target=torch.mean(resized_x, dim=0).view(n_times, -1).T,
+        # )
 
-        else:
-            spectral_loss = weights["spectral"] * cosine_spectral(
-                pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
-                target=torch.mean(resized_x, dim=1).view(n_lambdas, -1).T,
-            )
+        lambda_time_loss = weights["lambda_time"] * mse_lambda_time(
+            spc.flatten(),
+            resized_x.flatten(),
+        )
 
-            time_loss = weights["time"] * cosine_time(
-                pred=torch.mean(spc, dim=0).view(n_times, -1).T,
-                target=torch.mean(resized_x, dim=0).view(n_times, -1).T,
-            )
+        global_loss = weights["global"] * mse_global(
+            spc.sum(dim=(2, 3)).flatten(),
+            resized_x.sum(dim=(2, 3)).flatten(),
+        )
 
-            loss = spatial_loss + spectral_loss + time_loss
-            log = (
-                f"Spatial: {spatial_loss.item():.4F} | "
-                f"Spectral: {spectral_loss.item():.4F} | "
-                f"Time: {time_loss.item():.4F} | "
-            )
+        loss = spatial_loss + lambda_time_loss + global_loss
+        log = (
+            f"Spatial: {spatial_loss.item()} | "
+            f"Lambda Time: {lambda_time_loss.item()} | "
+            f"Global: {global_loss.item()} | "
+        )
 
         loss.backward()
 
@@ -207,44 +198,36 @@ def optimize(
 
 
 def optimize_with_continuous_time(
-        spc,
-        cmos,
-        weights,
-        t,
-        n_decays=1,
-        iterations=30,
-        lr=0.1,
-        init_type="random",
-        mask_initializations=False,
-        mask_gradients=False,
-        non_neg=False,
-        device="cpu",
-        seed=42,
-        return_numpy=True,
+    spc,
+    cmos,
+    weights,
+    t,
+    n_decays=1,
+    iterations=30,
+    lr=0.1,
+    init_type="random",
+    mask_initializations=False,
+    mask_gradients=False,
+    non_neg=False,
+    device="cpu",
+    seed=42,
+    return_numpy=True,
 ):
-    # Idea:
-    #       -- Use the optimization method to also find the decay of the exponential decay model.
-
-    #       -- I_0 * e^(-t / tau_0) + I_1 * e^(-t / tau_1) +  ... + I_n * e^(-t / tau_n)
-
-    #       -- The coefficients (I_0, tau_0, ...) are now the elements in the x tensor for the time dimension.
-
-    #       -- To jointly optimize x and perform regression on the decay parameters we can change the time loss to MSE
-    #          between the spc and the resized version of x.
-
-    #       -- The decay parameters have to be carefully integrated now in a separate resize though.
-
-    #       -- TODO: Think about better ways to integrate the decay parameters in the optimization for the resize.
-
     spc = torch.from_numpy(spc.astype(np.float32)).to(device)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
     cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)  # (z,x,y)
+
+    # spc_energy = spc.sum()
+    # cmos_energy = cmos.sum()
+    # spc = spc * (cmos_energy / spc_energy)
 
     n_lambdas = spc.shape[0]
     n_times = spc.shape[1]
     xy_dim = cmos.shape[1]
     z_dim = cmos.shape[0]
     x_shape = (n_lambdas, 3 * n_decays, z_dim, xy_dim, xy_dim)
+    if isinstance(t, np.ndarray):
+        t = torch.from_numpy(t.astype(np.float32)).to(device)
 
     # Initialization of the parameters
     x = _initialize_continuous_time(x_shape, init_type, device, seed)
@@ -259,6 +242,7 @@ def optimize_with_continuous_time(
     cosine_spectral = CosineLoss().to(device)
     mse_spatial = torch.nn.MSELoss().to(device)
     mse_decay = DecayLoss(t).to(device)
+    # mse_decay = torch.nn.MSELoss().to(device)
 
     # Down-sampler to resize the cmos xy dimensions to the xy dimensions of the spc
     down_sampler = Resize(
@@ -267,15 +251,40 @@ def optimize_with_continuous_time(
         antialias=True,
     ).to(device)
 
+    # down_sampler = torch.nn.LPPool2d(1, (4, 4), (4, 4))
+
+    # up_sampler = Resize(
+    #     size=(xy_dim, xy_dim),
+    #     interpolation=InterpolationMode.BILINEAR,
+    #     antialias=True,
+    # ).to(device)
+    #
+    # up_sampled_spc = up_sampler(spc)
+
     for _ in (progress_bar := tqdm(range(iterations))):
         optimizer.zero_grad()
-        resized_x = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
 
-        spatial_loss = weights["spatial"] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
+        # discrete_x = x.swapaxes(0, 1).reshape(3, -1)
+        # discrete_x = mono_exponential_decay_torch(discrete_x[0], discrete_x[1], discrete_x[2], t)
+        # discrete_x = discrete_x.reshape(n_times, n_lambdas, z_dim, xy_dim, xy_dim).swapaxes(0, 1)
+        # resized_x = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in discrete_x])
+        resized_x = torch.cat(
+            [down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x]
+        )
+
+        spatial_loss = weights["spatial"] * mse_spatial(
+            cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten()
+        )
+
         spectral_loss = weights["spectral"] * cosine_spectral(
             pred=torch.mean(resized_x, dim=1).view(n_lambdas, -1).T,
             target=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
         )
+
+        # time_loss = weights["time"] * mse_decay(
+        #     resized_x.mean(dim=0).flatten(),
+        #     spc.mean(dim=0).flatten()
+        # )
 
         time_loss = weights["time"] * mse_decay(
             pred_coeffs=torch.mean(resized_x, dim=0).view(3 * n_decays, -1).T,
@@ -302,19 +311,20 @@ def optimize_with_continuous_time(
                 x.data.clamp_(min=0.0)
 
         with torch.no_grad():
-            # Clamp I to max 1.0
-            x.data[:, 0, :, :, :].clamp_(max=1.0)
-            # Clamp c to max 0.1
-            x.data[:, 2, :, :, :].clamp_(max=0.1)
+            # Clamp I
+            x.data[:, 0, :, :, :].clamp_(max=1.1)
+            # Clamp c
+            x.data[:, 2, :, :, :].clamp_(max=0.01)
 
         progress_bar.set_description(log)
 
     x = torch.swapaxes(x, 0, 1)
     return x.detach().cpu().numpy() if return_numpy else x.detach()
 
+
 # Comments:
 
-# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine 
+# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine
 #   loss the global-map term is not needed. This term may be useful in the gradient descent method to keep the loss
 #   convex, since the cosine loss is not convex.
 #

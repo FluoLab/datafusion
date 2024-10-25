@@ -1,16 +1,20 @@
 import torch
+import numpy as np
 
-from utils import mono_exponential_decay
+from utils import mono_exponential_decay_torch
 
 
 class DecayLoss(torch.nn.Module):
     def __init__(self, t):
         super(DecayLoss, self).__init__()
-        self.t = torch.from_numpy(t).float()
+        if isinstance(t, np.ndarray):
+            self.t = torch.from_numpy(t).float()
+        else:
+            self.t = t
 
     def forward(self, pred_coeffs: torch.Tensor, target: torch.Tensor):
         pred_coeffs = pred_coeffs.T
-        pred = mono_exponential_decay(pred_coeffs[0], pred_coeffs[1], pred_coeffs[2], self.t)
+        pred = mono_exponential_decay_torch(pred_coeffs[0], pred_coeffs[1], pred_coeffs[2], self.t)
         return torch.nn.functional.mse_loss(pred.T, target)
 
 
