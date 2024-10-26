@@ -99,7 +99,7 @@ def optimize(
     seed=42,
     return_numpy=True,
 ):
-    torch.set_default_dtype(torch.DoubleTensor)
+    torch.set_default_dtype(torch.float64)
 
     spc = torch.from_numpy(spc.astype(np.float64)).to(device)
     spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
