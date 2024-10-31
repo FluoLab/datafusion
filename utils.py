@@ -16,136 +16,11 @@ RESOURCES_PATH = FILE_PATH.parent / "resources"
 FIGURES_PATH = FILE_PATH.parent / "figures"
 TVAL3_PATH = FILE_PATH.parent / "vendored" / "TVAL3"
 
-# Alberto's wavelengths and RGB values
-# WAVELENGTHS = np.array([380, 420, 440, 490, 510, 580, 645, 780])
-# R = np.array([97, 106, 0, 0, 0, 255, 255, 97]) / 255
-# G = np.array([0, 0, 0, 255, 255, 255, 0, 0]) / 255
-# B = np.array([97, 255, 255, 255, 0, 0, 0, 0]) / 255
-
-# TODO: Add wavelengths and RGB values from a file.
-WAVELENGTHS = np.array(
-    [
-        547.35972343,
-        556.56210764,
-        565.76449186,
-        574.96687608,
-        584.1692603,
-        593.37164452,
-        602.57402874,
-        611.77641296,
-        620.97879718,
-        630.18118139,
-        639.38356561,
-        648.58594983,
-        657.78833405,
-        666.99071827,
-        676.19310249,
-        685.39548671,
-    ]
-)
-
-# sRGB values
-R = (
-    np.array(
-        [
-            154,
-            184,
-            212,
-            240,
-            255,
-            255,
-            255,
-            255,
-            255,
-            255,
-            255,
-            251,
-            241,
-            231,
-            221,
-            211,
-        ]
-    )
-    / 255
-)
-G = (
-    np.array(
-        [
-            255,
-            255,
-            255,
-            255,
-            241,
-            212,
-            181,
-            149,
-            114,
-            78,
-            35,
-            30,
-            30,
-            30,
-            30,
-            30,
-        ]
-    )
-    / 255
-)
-B = (
-    np.array(
-        [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-    )
-    / 255
-)
-
-
-def srgb_to_linear(channel):
-    return np.where(
-        channel <= 0.04045,
-        channel / 12.92,
-        ((channel + 0.055) / 1.055) ** 2.4,
-    )
-
-
-def linear_to_srgb(channel):
-    return np.where(
-        channel <= 0.0031308,
-        12.92 * channel,
-        1.055 * (channel ** (1 / 2.4)) - 0.055,
-    ).clip(0, 1)
-
-
-def wavelength_to_srgb(lambdas):
-    return (
-        np.interp(lambdas, WAVELENGTHS, R),
-        np.interp(lambdas, WAVELENGTHS, G),
-        np.interp(lambdas, WAVELENGTHS, B),
-    )
-
-
-def wavelength_to_linear_rgb(lambdas):
-    return (
-        np.interp(lambdas, WAVELENGTHS, srgb_to_linear(R)),
-        np.interp(lambdas, WAVELENGTHS, srgb_to_linear(G)),
-        np.interp(lambdas, WAVELENGTHS, srgb_to_linear(B)),
-    )
+# L16 at 610nm: wavelengths and sRGB values (for old colouring scheme)
+# WAVELENGTHS = np.array([547.36, 556.56, 565.76, 574.97, 584.17, 593.37, 602.57, 611.78, 620.98, 630.18, 639.38, 648.59, 657.79, 666.99, 676.19, 685.4])
+# R = np.array([154, 184, 212, 240, 255, 255, 255, 255, 255, 255, 255, 251, 241, 231, 221, 211]) / 255
+# G = np.array([255, 255, 255, 255, 241, 212, 181, 149, 114, 78, 35, 30, 30, 30, 30, 30]) / 255
+# B = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) / 255
 
 
 def calibrate_spc(spc: np.ndarray, eff_path: Path, off_path: Path):
@@ -250,8 +125,24 @@ def load_raw_spc(spc_path: Path):
     return spc
 
 
-def spectral_volume_to_srgb(spectrum, spectral_volume):
-    if spectrum[0] < 380 or spectrum[-1] > 780:
+def linear_to_srgb(channel):
+    channel = channel.clip(0, 1)
+    return np.where(
+        channel <= 0.0031308,
+        12.92 * channel,
+        1.055 * (channel ** (1 / 2.4)) - 0.055,
+    )
+
+
+def wavelength_to_srgb(lambdas, method):
+    cmf_table = np.loadtxt(RESOURCES_PATH / f"srgb_cmf_{method}.csv", delimiter=",")
+    wavelengths = cmf_table[:, 0].flatten()
+    srgb_cmf = cmf_table[:, 1:].T
+    return np.array([np.interp(lambdas, wavelengths, channel) for channel in srgb_cmf])
+
+
+def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
+    if lambdas[0] < 380 or lambdas[-1] > 780:
         raise ValueError("Wavelength range out of visible range")
 
     if spectral_volume.ndim != 4:
@@ -259,34 +150,24 @@ def spectral_volume_to_srgb(spectrum, spectral_volume):
             "The spectral_volume should have 4 dimensions: (num_lambda, depth, height, width)"
         )
 
-    if spectrum.shape[0] != spectral_volume.shape[0]:
+    if lambdas.shape[0] != spectral_volume.shape[0]:
         raise ValueError(
             "The number of lambda values should match the number of lambda values in the tensor"
         )
 
-    num_lambda, depth, height, width = spectral_volume.shape
-
     # Values that are less than zero give problems in the spectral visualization
     spectral_volume[spectral_volume < 0] = 0
+    intensity_volume = spectral_volume.sum(axis=0)
 
-    r, g, b = wavelength_to_srgb(spectrum)
+    srgb_cmf = wavelength_to_srgb(lambdas, method)
+    rgb_volume = np.apply_along_axis(lambda s: srgb_cmf @ s, 0, spectral_volume)
 
-    images_r = np.zeros((num_lambda, depth, height, width))
-    images_g = np.zeros((num_lambda, depth, height, width))
-    images_b = np.zeros((num_lambda, depth, height, width))
+    # Discard (visual) intensity and scale to original (relative) photon intensity
+    rgb_volume /= rgb_volume.max(axis=0)
+    srgb_volume = linear_to_srgb(rgb_volume)
+    srgb_volume *= intensity_volume / intensity_volume.max()
 
-    for li in range(num_lambda):
-        for z in range(depth):
-            images_r[li, z] = r[li] * spectral_volume[li, z]
-            images_g[li, z] = g[li] * spectral_volume[li, z]
-            images_b[li, z] = b[li] * spectral_volume[li, z]
-
-    images_r = np.sum(images_r, axis=0)
-    images_g = np.sum(images_g, axis=0)
-    images_b = np.sum(images_b, axis=0)
-
-    srgb_volume = np.stack((images_r, images_g, images_b), axis=-1)
-    srgb_volume = srgb_volume / np.max(srgb_volume)
+    srgb_volume = np.moveaxis(srgb_volume, 0, -1)
     return srgb_volume
 
 
