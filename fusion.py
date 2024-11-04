@@ -1,120 +1,194 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from torch.nn.functional import mse_loss
 from torchvision.transforms import Resize, InterpolationMode
+from torchvision.transforms.functional import resize
+
+from baseline import baseline
 
 
-class CosineLoss(torch.nn.Module):
-    def __init__(self, dim=1, reduction="mean"):
-        super(CosineLoss, self).__init__()
-        self.dim = dim
-        self.reduction = reduction
+def _initialize(spc, cmos, x_shape, init_type, device, seed):
+    torch.manual_seed(seed)
+    if init_type == "random":
+        x = (cmos.min() - cmos.max()) * torch.rand(x_shape, device=device) + cmos.max()
+    elif init_type == "zeros":
+        x = torch.zeros(x_shape).to(device)
+    elif init_type == "baseline":
+        x = baseline(cmos, spc, device, return_numpy=False)
+    elif init_type == "upsampled_spc":
+        upsampler = Resize(
+            size=(cmos.shape[-2], cmos.shape[-1]),
+            interpolation=InterpolationMode.NEAREST,
+        ).to(device)
+        x = upsampler(spc).unsqueeze(2).repeat(1, 1, cmos.shape[0], 1, 1)
+    else:
+        raise ValueError("Invalid initialization type.")
+    return x
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> float:
-        cos_sim = 1 - torch.nn.functional.cosine_similarity(pred, target, dim=self.dim)
-        if self.reduction == "mean":
-            return cos_sim.mean()
-        else:
-            return cos_sim.sum()
+
+def _mask_gradients(x, cmos_mask):
+    x.grad[:, :, ~cmos_mask] = 0.0
 
 
-def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="cpu", seed=42):
-    """
-    Parameters
-    ----------
-    spc : np.ndarray
-        The spectral cube to be used for the optimization.
-    cmos : np.ndarray
-        The CMOS data to be used for the optimization.
-    iterations : int
-        The number of iterations to run the optimization.
-    lr : float
-        The learning rate to be used for the optimization.
-    weights : tuple
-        The weights to be used for the loss function. The order is:
-        (spectral_loss, time_loss, spatial_loss, non_neg_loss, global_map_loss)
-    device : str
-        The device to be used for the optimization.
-    seed : int
-        The seed to be used for the random initialization of the data.
+def _get_masks(spc, cmos):
+    cmos_mask = cmos > (0.05 * cmos.max())
+    spc_mask = resize(
+        cmos_mask.any(dim=0).unsqueeze(0).float(),
+        size=[spc.shape[-2], spc.shape[-1]],
+        interpolation=InterpolationMode.BILINEAR,
+        antialias=False,
+    ).bool()
+    return spc_mask, cmos_mask
 
-    Returns
-    -------
-    torch.Tensor
-        The optimized spectral cube.
-    """
 
-    spc = torch.from_numpy(spc.astype(np.float32)).to(device)
-    cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)
+def normalize_energy(tensor, total_energy=1):
+    return total_energy * tensor / tensor.sum()
+
+
+def fuse(
+    spc,
+    cmos,
+    weights,
+    iterations=100,
+    lr=0.001,
+    l2_regularization=1e-5,
+    init_type="random",
+    mask_initializations=False,
+    mask_gradients=False,
+    non_neg=True,
+    device="cpu",
+    seed=42,
+    total_energy=1000,
+    return_numpy=True,
+):
+    # torch.set_default_dtype(torch.float64)
+
+    # Convert numpy arrays to torch tensors
+    if isinstance(spc, np.ndarray):
+        spc = torch.from_numpy(spc.astype(np.float32))  # (time,lambda,x,y)
+    if isinstance(cmos, np.ndarray):
+        cmos = torch.from_numpy(cmos.astype(np.float32))  # (z,x,y)
+
+    spc = spc.to(device)
+    cmos = cmos.to(device)
 
     n_times = spc.shape[0]
     n_lambdas = spc.shape[1]
     xy_dim = cmos.shape[1]
     z_dim = cmos.shape[0]
+    x_shape = (n_times, n_lambdas, z_dim, xy_dim, xy_dim)
+    spatial_increase = cmos.shape[-1] // spc.shape[-1]
 
-    torch.manual_seed(seed)
-    x = torch.rand(n_times, n_lambdas, z_dim, xy_dim, xy_dim).to(device)
+    spatial_loss_history = []
+    lambda_time_loss_history = []
+    global_loss_history = []
 
-    x = torch.swapaxes(x, 0, 1)  # (lambda,time,z,x,y)
-    spc = torch.swapaxes(spc, 0, 1)  # (lambda,time,x,y)
+    # Get the masks for the spatial dimensions
+    spc_mask, cmos_mask = _get_masks(spc, cmos)
 
-    x = torch.nn.Parameter(x)
-    x.data.requires_grad_(True)
-    optimizer = torch.optim.Adam([x], lr=lr)
+    # Mask
+    if mask_initializations:
+        spc = spc * spc_mask.float()
+        cmos = cmos * cmos_mask.float()
 
-    cosine_spectral = CosineLoss().to(device)
-    cosine_time = CosineLoss().to(device)
-    mse_spatial = torch.nn.MSELoss().to(device)
-    mse_non_neg = torch.nn.MSELoss().to(device)
-    mse_global_map = torch.nn.MSELoss().to(device)
+    # Normalize the energy of the input data
+    spc = normalize_energy(spc, total_energy)
+    cmos = normalize_energy(cmos, total_energy)
 
-    down_sampler = Resize(
-        size=(spc.shape[-2], spc.shape[-1]),
-        interpolation=InterpolationMode.BILINEAR,
-        antialias=True,
-    ).to(device)
+    # Initialize the parameters
+    x = _initialize(spc, cmos, x_shape, init_type, device, seed)
+    x = normalize_energy(x, total_energy)
+    if mask_initializations:
+        x[:, :, ~cmos_mask] = 0.0
+    x = torch.nn.Parameter(x, requires_grad=True)
 
-    spectrum_time = torch.mean(spc, dim=(2, 3))
-    spectrum_time = spectrum_time / torch.sum(spectrum_time)
+    spc_mask = spc_mask.squeeze(0)
+    optimizer = torch.optim.Adam([x], lr=lr, amsgrad=True, weight_decay=l2_regularization)
 
-    for it in range(iterations):
-        resized = torch.cat([down_sampler(torch.mean(xi, dim=1)).unsqueeze(0) for xi in x])
+    down_sampler = torch.nn.LPPool2d(1, spatial_increase, spatial_increase)
 
-        spectral_loss = weights[0] * cosine_spectral(
-            pred=torch.mean(spc, dim=1).view(n_lambdas, -1).T,
-            target=torch.mean(resized, dim=1).view(n_lambdas, -1).T,
-        )
-
-        time_loss = weights[1] * cosine_time(
-            pred=torch.mean(spc, dim=0).view(n_times, -1).T,
-            target=torch.mean(resized, dim=0).view(n_times, -1).T,
-        )
-
-        spatial_loss = weights[2] * mse_spatial(cmos.flatten(), torch.mean(x, dim=(0, 1)).flatten())
-        non_neg_loss = weights[3] * mse_non_neg(x.flatten(), torch.nn.functional.relu(x.flatten()))
-        global_map_loss = weights[4] * mse_global_map(spectrum_time, torch.mean(x, dim=(2, 3, 4)))
-        # spectral_loss = weights[0] * f.mse_loss(spc.flatten(), resized.flatten())
-
-        loss = spectral_loss + time_loss + spatial_loss + non_neg_loss + global_map_loss
-
-        loss.backward()
-        optimizer.step()
+    for _ in (progress_bar := tqdm(range(iterations))):
         optimizer.zero_grad()
+        resized_x = torch.cat([down_sampler(xi.sum(dim=1)).unsqueeze(0) for xi in x])
 
-        print(
-            f"Iteration {it + 1} | "
-            f"Spectral: {spectral_loss.item():.4F} | "
-            f"Time: {time_loss.item():.4F} | "
-            f"Spatial: {spatial_loss.item():.4F} | "
-            f"Non Neg: {non_neg_loss.item():.4F} | "
-            f"Global: {global_map_loss.item():.4F} | "
+        # Computing losses
+        if mask_gradients:
+            spatial_loss = weights["spatial"] * mse_loss(
+                cmos[cmos_mask], torch.sum(x, dim=(0, 1))[cmos_mask]
+            )
+
+            lambda_time_loss = weights["lambda_time"] * mse_loss(
+                spc[:, :, spc_mask], resized_x[:, :, spc_mask]
+            )
+
+        else:
+            spatial_loss = weights["spatial"] * mse_loss(
+                cmos.flatten(), torch.sum(x, dim=(0, 1)).flatten()
+            )
+
+            lambda_time_loss = weights["lambda_time"] * mse_loss(
+                spc.flatten(), resized_x.flatten()
+            )
+
+        # Global has no spatial dimension, so no need to mask.
+        global_loss = weights["global"] * mse_loss(
+            spc.sum(dim=(2, 3)).flatten(),
+            resized_x.sum(dim=(2, 3)).flatten(),
         )
 
-    return torch.swapaxes(x, 0, 1).detach().cpu().numpy()
+        loss = spatial_loss + lambda_time_loss + global_loss
+        loss.backward()
+        log = (
+            f"Spatial: {spatial_loss.item():.2E} | "
+            f"Lambda Time: {lambda_time_loss.item():.2E} | "
+            f"Global: {global_loss.item():.2E} | "
+            f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
+        )
+        spatial_loss_history.append(spatial_loss.item())
+        lambda_time_loss_history.append(lambda_time_loss.item())
+        global_loss_history.append(global_loss.item())
+
+        if mask_gradients:
+            _mask_gradients(x, cmos_mask)
+        optimizer.step()
+
+        # Clamping the values to be non-negative
+        if non_neg:
+            with torch.no_grad():
+                x.copy_(x.data.clamp(min=0))
+
+        progress_bar.set_description(log)
+
+    _, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].plot(spatial_loss_history)
+    ax[0].set_title("Spatial Loss")
+    ax[0].set_yscale("log")
+    ax[1].plot(lambda_time_loss_history)
+    ax[1].set_title("Lambda Time Loss")
+    ax[1].set_yscale("log")
+    ax[2].plot(global_loss_history)
+    ax[2].set_title("Global Loss")
+    ax[2].set_yscale("log")
+    plt.show()
+
+    if return_numpy:
+        return (
+            x.detach().cpu().numpy(),
+            spc.detach().cpu().numpy(),
+            cmos.detach().cpu().numpy(),
+        )
+    else:
+        return x.detach(), spc.detach(), cmos.detach()
+
 
 # Comments:
-# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine 
+
+# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine
 #   loss the global-map term is not needed. This term may be useful in the gradient descent method to keep the loss
 #   convex, since the cosine loss is not convex.
+#
 # - To initialize the x consider also the following code snippet:
 #       x = torch.rand(n_times, n_lambdas, z_dim, xy_dim, xy_dim)
 #       up_sampler = transforms.Resize((xy_dim, xy_dim), interpolation=transforms.InterpolationMode.BILINEAR)
@@ -123,3 +197,4 @@ def optimize(spc, cmos, iterations=30, lr=0.1, weights=(1, 1, 1, 1, 1), device="
 #       # Starting point
 #       for zi in range(x.shape[2]):
 #           x[:, :, zi, :, :] = up_sampler(spc) * weights_z[zi]
+#
