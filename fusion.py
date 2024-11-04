@@ -105,7 +105,9 @@ def fuse(
     x = torch.nn.Parameter(x, requires_grad=True)
 
     spc_mask = spc_mask.squeeze(0)
-    optimizer = torch.optim.Adam([x], lr=lr, amsgrad=True, weight_decay=l2_regularization)
+    optimizer = torch.optim.Adam(
+        [x], lr=lr, amsgrad=True, weight_decay=l2_regularization
+    )
 
     down_sampler = torch.nn.LPPool2d(1, spatial_increase, spatial_increase)
 
@@ -144,7 +146,7 @@ def fuse(
             f"Spatial: {spatial_loss.item():.2E} | "
             f"Lambda Time: {lambda_time_loss.item():.2E} | "
             f"Global: {global_loss.item():.2E} | "
-            f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
+            # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
         )
         spatial_loss_history.append(spatial_loss.item())
         lambda_time_loss_history.append(lambda_time_loss.item())
@@ -180,21 +182,4 @@ def fuse(
             cmos.detach().cpu().numpy(),
         )
     else:
-        return x.detach(), spc.detach(), cmos.detach()
-
-
-# Comments:
-
-# - The global-map term is useful if we use the MSE for the time and spectrum to remove the offset. Using the cosine
-#   loss the global-map term is not needed. This term may be useful in the gradient descent method to keep the loss
-#   convex, since the cosine loss is not convex.
-#
-# - To initialize the x consider also the following code snippet:
-#       x = torch.rand(n_times, n_lambdas, z_dim, xy_dim, xy_dim)
-#       up_sampler = transforms.Resize((xy_dim, xy_dim), interpolation=transforms.InterpolationMode.BILINEAR)
-#       weights_z = torch.mean(cmos, dim=(1, 2))
-#       weights_z /= weights_z.max()
-#       # Starting point
-#       for zi in range(x.shape[2]):
-#           x[:, :, zi, :, :] = up_sampler(spc) * weights_z[zi]
-#
+        return x, spc, cmos
