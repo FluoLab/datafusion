@@ -8,12 +8,6 @@ from tqdm import tqdm
 def baseline(cmos, spc, device, return_numpy=True):
     # Idea: Use bilinear interpolation for SPC and then multiply by normalized CMOS for each z.
 
-    # for each time:
-    #   for each lambda:
-    #       for each z in cmos:
-    #           interpolate spc to z
-    #           multiply spc by cmos[z]
-
     if isinstance(spc, np.ndarray):
         spc = torch.from_numpy(spc.astype(np.float32)).to(device)  # (time,lambda,x,y)
 
@@ -25,7 +19,9 @@ def baseline(cmos, spc, device, return_numpy=True):
     xy_dim = cmos.shape[1]
     z_dim = cmos.shape[0]
 
-    x = torch.zeros((n_times, n_lambdas, z_dim, xy_dim, xy_dim), requires_grad=False).to(device)
+    x = torch.zeros(
+        (n_times, n_lambdas, z_dim, xy_dim, xy_dim), requires_grad=False
+    ).to(device)
 
     upsampler = Resize(
         size=(cmos.shape[-2], cmos.shape[-1]),

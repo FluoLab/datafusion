@@ -9,7 +9,6 @@ import numpy as np
 import scipy as sp
 from tqdm import tqdm
 from scipy.optimize import nnls
-from scipy.optimize import curve_fit
 
 FILE_PATH = Path(__file__)
 RESOURCES_PATH = FILE_PATH.parent / "resources"
@@ -110,19 +109,88 @@ def reconstruct_spc(
     return recon.reshape(spc.shape[0], spc.shape[1], img_dim, img_dim)
 
 
-def load_raw_spc(spc_path: Path):
+def load_raw_spc(
+    spc_path: Path, n_measurements: int = 1024, dtype: np.dtype = np.float64
+):
     """
-    Loads the raw SPC data.
-    :param spc_path: Path to the raw SPC data.
+    Loads the raw SPC data. The data is expected to be in the shape (n_measurements, n_spectra, n_times).
+    :param spc_path: Path to the additional SPC data.
+    :param n_measurements: Number of measurements used.
+    :param dtype: Data type to use.
     :return: Raw SPC data of shape (n_times, n_spectra, n_measurements).
     """
+    # TODO: This only works for Pos One Neg type of measurement, add other options.
     with h5py.File(spc_path, "r") as f:
-        spc = np.array(f["spc"])[1:1026]
+        spc = np.array(f["spc"], order="C")[1 : n_measurements + 2]
         spc[545] = spc[0] + spc[1]
         spc = np.delete(spc, 1, axis=0)
-        spc = spc.astype(np.float64)
+        spc = spc.astype(dtype)
         spc = np.swapaxes(spc, 0, 2)
     return spc
+
+
+def preprocess_raw_spc(
+    raw_spc_path: Path,
+    reconstruction_save_path: Path,
+    forward_matrix_path: Path,
+    efficiency_calib_path: Path,
+    offset_calib_path: Path,
+    temporal_axis_path: Path,
+    n_measurements: int,
+    max_times: int = 2048,
+    n_bins: int = 32,
+    n_jobs: int = 8,
+    dtype: np.dtype = np.float64,
+):
+    """
+    Preprocesses the raw SPC data and saves the reconstruction.
+    The preprocessing steps it takes are:
+    1. Calibrate the SPC data.
+    2. Cut the SPC data.
+    3. Bin the SPC data.
+    4. Reconstruct the SPC data.
+    :param raw_spc_path: The path to the raw SPC data.
+    :param reconstruction_save_path:  The path to save the reconstruction.
+    :param forward_matrix_path: Path to the forward matrix.
+    :param efficiency_calib_path: Path to the efficiency calibration.
+    :param offset_calib_path: Path to the offset calibration.
+    :param temporal_axis_path: Path to the temporal axis.
+    :param n_measurements: Number of measurements.
+    :param max_times: Maximum number of times to keep.
+    :param n_bins: Number of bins to use.
+    :param n_jobs: Number of jobs to use for parallelization.
+    :param dtype: Data type to use.
+    :return: The reconstructed SPC data, the binned time axis, and the binned time step.
+    """
+    spc = load_raw_spc(raw_spc_path, n_measurements=n_measurements, dtype=dtype)
+    # (n_times, n_spectra, n_measurements)
+
+    forward_matrix = sp.io.loadmat(str(forward_matrix_path))["M"][::2]
+    forward_matrix = np.array(forward_matrix, dtype=dtype, order="C")
+    # (n_measurements, pattern_size)
+
+    t = np.load(temporal_axis_path).flatten().astype(dtype)
+    # (n_times,)
+
+    spc_calib = calibrate_spc(spc, efficiency_calib_path, offset_calib_path)
+    spc_calib_cut, t_cut = cut_spc(spc_calib, t, max_times=max_times)
+    spc_calib_cut_binned, t_cut_binned, dt_cut_binned = bin_spc(
+        spc_calib_cut, t_cut, n_bins=n_bins
+    )
+    spc_recon = reconstruct_spc(
+        spc_calib_cut_binned,
+        forward_matrix,
+        algo=nnls,  # accepts also scipy.linalg.lstsq
+        n_jobs=n_jobs,
+    )  # (n_times, n_spectra, img_dim, img_dim)
+
+    np.savez_compressed(
+        reconstruction_save_path,
+        spc_recon=spc_recon,
+        t_cut_binned=t_cut_binned,
+        dt_cut_binned=dt_cut_binned,
+    )
+    return spc_recon, t_cut_binned, dt_cut_binned
 
 
 def linear_to_srgb(channel):
@@ -147,7 +215,7 @@ def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
 
     if spectral_volume.ndim != 4:
         raise ValueError(
-            "The spectral_volume should have 4 dimensions: (num_lambda, depth, height, width)"
+            "The spectral_volume should have 4 dimensions: (n_lambdas, depth, height, width)"
         )
 
     if lambdas.shape[0] != spectral_volume.shape[0]:
@@ -179,37 +247,6 @@ def wavelet_denoising(x, wavelet="db2", threshold=0.1):
 
 def time_volume_to_lifetime(t, dt, time_volume):
     raise NotImplementedError("This function is not implemented yet.")
-
-
-def bin_data(data, t, dt):
-    # TODO: Fix naming
-    bin_size = round(len(t) / (dt / (t[1] - t[0])))
-
-    if bin_size < len(t):
-        N = data.shape[0]
-        K = np.arange(1, N + 1)
-        D = K[N % K == 0]
-        p = np.argmin(np.abs(bin_size - D))
-        bins = D[p]
-        bin_length = int(N / bins)
-
-        binned = np.zeros((bins, data.shape[1], data.shape[2], data.shape[3]))
-        for li in range(data.shape[1]):
-            for xi in range(data.shape[2]):
-                for yi in range(data.shape[3]):
-                    binned[:, li, xi, yi] = (
-                        data[:, li, xi, yi].reshape(-1, bin_length).sum(axis=1)
-                    )
-        t = t.reshape(-1, bin_length).mean(axis=1)
-    else:
-        raise ValueError("The bin size is larger than the data.")
-
-    if abs((t[1] - t[0]) - dt) > (dt / 2):
-        print("Some problems determining the desired bin size.")
-
-    dt = t[1] - t[0]
-
-    return t, binned, dt
 
 
 def mono_exponential_decay_numpy(t, I, tau, c):
