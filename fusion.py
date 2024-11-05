@@ -53,7 +53,6 @@ def fuse(
     weights,
     iterations=100,
     lr=0.001,
-    l2_regularization=1e-5,
     init_type="random",
     mask_initializations=False,
     mask_gradients=False,
@@ -105,11 +104,9 @@ def fuse(
     x = torch.nn.Parameter(x, requires_grad=True)
 
     spc_mask = spc_mask.squeeze(0)
-    optimizer = torch.optim.Adam(
-        [x], lr=lr, amsgrad=True, weight_decay=l2_regularization
-    )
+    optimizer = torch.optim.Adam([x], lr=lr, amsgrad=True)
 
-    down_sampler = torch.nn.LPPool2d(1, spatial_increase, spatial_increase)
+    down_sampler = torch.nn.LPPool2d(1, spatial_increase, spatial_increase).to(device)
 
     for _ in (progress_bar := tqdm(range(iterations))):
         optimizer.zero_grad()
@@ -118,18 +115,16 @@ def fuse(
         # Computing losses
         if mask_gradients:
             spatial_loss = weights["spatial"] * mse_loss(
-                cmos[cmos_mask], torch.sum(x, dim=(0, 1))[cmos_mask]
+                cmos[cmos_mask], x.sum(dim=(0, 1))[cmos_mask]
             )
-
             lambda_time_loss = weights["lambda_time"] * mse_loss(
                 spc[:, :, spc_mask], resized_x[:, :, spc_mask]
             )
 
         else:
             spatial_loss = weights["spatial"] * mse_loss(
-                cmos.flatten(), torch.sum(x, dim=(0, 1)).flatten()
+                cmos.flatten(), x.sum(dim=(0, 1)).flatten()
             )
-
             lambda_time_loss = weights["lambda_time"] * mse_loss(
                 spc.flatten(), resized_x.flatten()
             )
@@ -137,11 +132,14 @@ def fuse(
         # Global has no spatial dimension, so no need to mask.
         global_loss = weights["global"] * mse_loss(
             spc.sum(dim=(2, 3)).flatten(),
-            resized_x.sum(dim=(2, 3)).flatten(),
+            x.sum(dim=(2, 3, 4)).flatten(),
         )
 
         loss = spatial_loss + lambda_time_loss + global_loss
+        if weights["l2_regularization"] > 0:
+            loss = loss + weights["l2_regularization"] * x.norm(2)
         loss.backward()
+
         log = (
             f"Spatial: {spatial_loss.item():.2E} | "
             f"Lambda Time: {lambda_time_loss.item():.2E} | "
