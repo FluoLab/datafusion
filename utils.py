@@ -3,17 +3,40 @@ from copy import deepcopy
 from joblib import Parallel, delayed
 
 import h5py
-import pywt
 import torch
 import numpy as np
 import scipy as sp
+import matlab.engine
 from tqdm import tqdm
-from scipy.optimize import nnls
+from scipy.linalg import lstsq
 
 FILE_PATH = Path(__file__)
 RESOURCES_PATH = FILE_PATH.parent / "resources"
 FIGURES_PATH = FILE_PATH.parent / "figures"
 TVAL3_PATH = FILE_PATH.parent / "vendored" / "TVAL3"
+
+
+class TVAL3:
+    def __init__(self, img_shape: tuple[int, int]):
+        self.eng = matlab.engine.start_matlab()
+        self.eng.cd(str(TVAL3_PATH), nargout=0)
+        self.eng.addpath(self.eng.genpath(str(TVAL3_PATH)))
+        self.img_shape = img_shape
+
+    def __call__(
+        self,
+        forward_op: np.ndarray,
+        measurements: np.ndarray,
+    ) -> tuple[np.ndarray, any]:
+        reconstruction = self.eng.TVAL3(
+            np.ascontiguousarray(forward_op, dtype=np.float32),
+            np.ascontiguousarray(measurements.reshape(-1, 1), dtype=np.float32),
+            self.img_shape[0],
+            self.img_shape[1],
+        )
+        # Returns tuple to match the nnls and lstsq functions in scipy
+        return np.abs(np.array(reconstruction)).flatten().astype(np.float32), 0
+
 
 # L16 at 610nm: wavelengths and sRGB values (for old colouring scheme)
 # WAVELENGTHS = np.array([547.36, 556.56, 565.76, 574.97, 584.17, 593.37, 602.57, 611.78, 620.98, 630.18, 639.38, 648.59, 657.79, 666.99, 676.19, 685.4])
@@ -86,7 +109,11 @@ def bin_spc(spc: np.ndarray, t: np.ndarray, n_bins: int = 64):
 
 
 def reconstruct_spc(
-    spc: np.ndarray, forward_matrix: np.ndarray, algo: callable = nnls, n_jobs: int = 8
+    spc: np.ndarray,
+    forward_matrix: np.ndarray,
+    algo: callable = lstsq,
+    n_jobs: int = 8,
+    img_dim: int = 32,
 ):
     """
     Reconstructs the SPC from the forward matrix and the SPC.
@@ -94,13 +121,13 @@ def reconstruct_spc(
     :param forward_matrix: Forward matrix of shape (n_measurements, pattern_size).
     :param algo: Algorithm to use for the reconstruction.
     :param n_jobs: Number of jobs to use for parallelization.
+    :param img_dim: Image dimension.
     :return: Image reconstruction of shape (n_times, n_spectra, img_dim, img_dim).
              Where img_dim is the square root of the number of measurements.
     """
-    n_times, n_spectra, n_measurements = spc.shape[0], spc.shape[1], spc.shape[2]
-    img_dim = int(np.sqrt(n_measurements))
+    n_times, n_spectra, n_measurements = spc.shape[0], spc.shape[1], int(img_dim**2)
 
-    recon = np.empty((n_times, n_spectra, n_measurements), dtype=np.float64)
+    recon = np.empty((n_times, n_spectra, n_measurements), dtype=np.float32)
     for s in tqdm(range(spc.shape[1])):
         s_recon = Parallel(n_jobs=n_jobs)(
             delayed(algo)(forward_matrix, spc[t, s]) for t in range(n_times)
@@ -140,6 +167,8 @@ def preprocess_raw_spc(
     max_times: int = 2048,
     n_bins: int = 32,
     n_jobs: int = 8,
+    algo: callable = lstsq,
+    compression: float | None = 1,
     dtype: np.dtype = np.float64,
 ):
     """
@@ -160,6 +189,8 @@ def preprocess_raw_spc(
     :param n_bins: Number of bins to use.
     :param n_jobs: Number of jobs to use for parallelization.
     :param dtype: Data type to use.
+    :param algo: Algorithm to use for the reconstruction.
+    :param compression: Compression factor to use.
     :return: The reconstructed SPC data, the binned time axis, and the binned time step.
     """
     spc = load_raw_spc(raw_spc_path, n_measurements=n_measurements, dtype=dtype)
@@ -169,6 +200,11 @@ def preprocess_raw_spc(
     forward_matrix = np.array(forward_matrix, dtype=dtype, order="C")
     # (n_measurements, pattern_size)
 
+    if compression is not None and compression < 1:
+        n_patterns = int((1 - compression) * forward_matrix.shape[0])
+        spc = spc[:, :, :n_patterns]
+        forward_matrix = forward_matrix[:n_patterns]
+
     t = np.load(temporal_axis_path).flatten().astype(dtype)
     # (n_times,)
 
@@ -177,10 +213,11 @@ def preprocess_raw_spc(
     spc_calib_cut_binned, t_cut_binned, dt_cut_binned = bin_spc(
         spc_calib_cut, t_cut, n_bins=n_bins
     )
+
     spc_recon = reconstruct_spc(
         spc_calib_cut_binned,
         forward_matrix,
-        algo=nnls,  # accepts also scipy.linalg.lstsq
+        algo=algo,  # accepts nnls, lstsq, and TVAL3(),
         n_jobs=n_jobs,
     )  # (n_times, n_spectra, img_dim, img_dim)
 
@@ -239,13 +276,7 @@ def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
     return srgb_volume
 
 
-def wavelet_denoising(x, wavelet="db2", threshold=0.1):
-    coeffs = pywt.wavedec(x, wavelet)
-    coeffs_thresholded = [pywt.threshold(c, threshold) for c in coeffs]
-    return pywt.waverec(coeffs_thresholded, wavelet)
-
-
-def time_volume_to_lifetime(t, dt, time_volume):
+def time_volume_to_lifetime():
     raise NotImplementedError("This function is not implemented yet.")
 
 

@@ -1,183 +1,336 @@
 import torch
 import numpy as np
+import deepinv as dinv
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from torch.nn.functional import mse_loss
-from torchvision.transforms import Resize, InterpolationMode
+from torch.nn.functional import conv2d, conv_transpose2d
+from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize
 
 from baseline import baseline
 
 
-def _initialize(spc, cmos, x_shape, init_type, device, seed):
-    torch.manual_seed(seed)
-    if init_type == "random":
-        x = (cmos.min() - cmos.max()) * torch.rand(x_shape, device=device) + cmos.max()
-    elif init_type == "zeros":
-        x = torch.zeros(x_shape).to(device)
-    elif init_type == "baseline":
-        x = baseline(cmos, spc, device, return_numpy=False)
-    elif init_type == "upsampled_spc":
-        upsampler = Resize(
-            size=(cmos.shape[-2], cmos.shape[-1]),
-            interpolation=InterpolationMode.NEAREST,
-        ).to(device)
-        x = upsampler(spc).unsqueeze(2).repeat(1, 1, cmos.shape[0], 1, 1)
-    else:
-        raise ValueError("Invalid initialization type.")
-    return x
+def squared_l2(x):
+    return torch.sum(x**2)
 
 
-def _mask_gradients(x, cmos_mask):
-    x.grad[:, :, ~cmos_mask] = 0.0
-
-
-def _get_masks(spc, cmos):
-    cmos_mask = cmos > (0.05 * cmos.max())
-    spc_mask = resize(
-        cmos_mask.any(dim=0).unsqueeze(0).float(),
-        size=[spc.shape[-2], spc.shape[-1]],
-        interpolation=InterpolationMode.BILINEAR,
-        antialias=False,
-    ).bool()
-    return spc_mask, cmos_mask
-
-
-def normalize_energy(tensor, total_energy=1):
-    return total_energy * tensor / tensor.sum()
-
-
-def fuse(
-    spc,
-    cmos,
-    weights,
-    iterations=100,
-    lr=0.001,
-    init_type="random",
-    mask_initializations=False,
-    mask_gradients=False,
-    non_neg=True,
-    device="cpu",
-    seed=42,
-    total_energy=1000,
-    return_numpy=True,
-):
-    # torch.set_default_dtype(torch.float64)
-
-    # Convert numpy arrays to torch tensors
+def fusion_loss_test(x, spc, cmos):
     if isinstance(spc, np.ndarray):
-        spc = torch.from_numpy(spc.astype(np.float32))  # (time,lambda,x,y)
+        spc = torch.from_numpy(spc.astype(np.float32))
     if isinstance(cmos, np.ndarray):
-        cmos = torch.from_numpy(cmos.astype(np.float32))  # (z,x,y)
+        cmos = torch.from_numpy(cmos.astype(np.float32))
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x.astype(np.float32))
 
-    spc = spc.to(device)
-    cmos = cmos.to(device)
+    T = IntegralOperator(size=spc.shape[0], integral_dim=0)
+    S = IntegralOperator(size=spc.shape[1], integral_dim=1)
+    D = IntegralOperator(size=cmos.shape[0], integral_dim=2)
+    R = SumPoolOperator(
+        size=cmos.shape[-1] // spc.shape[-1], channels=spc.shape[1], device=x.device
+    )
 
-    n_times = spc.shape[0]
-    n_lambdas = spc.shape[1]
-    xy_dim = cmos.shape[1]
-    z_dim = cmos.shape[0]
-    x_shape = (n_times, n_lambdas, z_dim, xy_dim, xy_dim)
-    spatial_increase = cmos.shape[-1] // spc.shape[-1]
+    spatial_loss = squared_l2(cmos.flatten() - T(S(x)).flatten())
+    lambda_time_loss = squared_l2(spc.flatten() - R(D(x)).flatten())
+    return 0.5 * spatial_loss.item(), 0.5 * lambda_time_loss.item()
 
-    spatial_loss_history = []
-    lambda_time_loss_history = []
-    global_loss_history = []
 
-    # Get the masks for the spatial dimensions
-    spc_mask, cmos_mask = _get_masks(spc, cmos)
+class IntegralOperator(dinv.physics.LinearPhysics):
+    def __init__(self, size=1, integral_dim=0, **kwargs):
+        super().__init__(**kwargs)
+        self.size = size
+        self.integral_dim = integral_dim
 
-    # Mask
-    if mask_initializations:
-        spc = spc * spc_mask.float()
-        cmos = cmos * cmos_mask.float()
+    def A(self, x, **kwargs):
+        self.size = x.shape[self.integral_dim]
+        return x.sum(dim=self.integral_dim, keepdim=True)
 
-    # Normalize the energy of the input data
-    spc = normalize_energy(spc, total_energy)
-    cmos = normalize_energy(cmos, total_energy)
+    def A_adjoint(self, y, **kwargs):
+        return y.repeat_interleave(self.size, dim=self.integral_dim) / self.size
 
-    # Initialize the parameters
-    x = _initialize(spc, cmos, x_shape, init_type, device, seed)
-    x = normalize_energy(x, total_energy)
-    if mask_initializations:
-        x[:, :, ~cmos_mask] = 0.0
-    x = torch.nn.Parameter(x, requires_grad=True)
 
-    spc_mask = spc_mask.squeeze(0)
-    optimizer = torch.optim.Adam([x], lr=lr, amsgrad=True)
+class SumPoolOperator(dinv.physics.LinearPhysics):
+    def __init__(self, size=4, channels=16, device="cpu", **kwargs):
+        super().__init__(**kwargs)
+        self.size = size
+        self.kernel = torch.ones(channels, 1, size, size, device=device)
+        self.channels = channels
 
-    down_sampler = torch.nn.LPPool2d(1, spatial_increase, spatial_increase).to(device)
+    def A(self, x, **kwargs):
+        x = x.squeeze(2)
+        y = conv2d(x, self.kernel, stride=self.size, groups=self.channels, bias=None)
+        y = y.unsqueeze(2)
+        return y
 
-    for _ in (progress_bar := tqdm(range(iterations))):
-        optimizer.zero_grad()
-        resized_x = torch.cat([down_sampler(xi.sum(dim=1)).unsqueeze(0) for xi in x])
+    def A_adjoint(self, y, **kwargs):
+        y = y.squeeze(2)
+        x = conv_transpose2d(
+            y, self.kernel, stride=self.size, groups=self.channels, bias=None
+        )
+        x = x.unsqueeze(2)
+        return x / self.size**2
 
-        # Computing losses
-        if mask_gradients:
-            spatial_loss = weights["spatial"] * mse_loss(
-                cmos[cmos_mask], x.sum(dim=(0, 1))[cmos_mask]
+
+class Fusion:
+    def __init__(
+        self,
+        spc,
+        cmos,
+        init_type,
+        mask_noise=False,
+        total_energy=1,
+        device="cpu",
+        seed=42,
+    ):
+        if isinstance(spc, np.ndarray):
+            # spc: (time,lambda,x,y)
+            self.spc = torch.from_numpy(spc.astype(np.float32)).to(device)
+        if isinstance(cmos, np.ndarray):
+            # cmos: (z,x,y)
+            self.cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)
+
+        self.init_type = init_type
+        self.seed = seed
+        self.mask_noise = mask_noise
+        self.device = device
+        self.n_times = spc.shape[0]
+        self.n_lambdas = spc.shape[1]
+        self.xy_dim = cmos.shape[1]
+        self.z_dim = cmos.shape[0]
+        self.x_shape = (
+            spc.shape[0],
+            spc.shape[1],
+            cmos.shape[0],
+            cmos.shape[1],
+            cmos.shape[2],
+        )
+        self.spatial_increase = cmos.shape[-1] // spc.shape[-1]
+
+        self.T = IntegralOperator(size=self.n_times, integral_dim=0)
+        self.S = IntegralOperator(size=self.n_lambdas, integral_dim=1)
+        self.D = IntegralOperator(size=self.z_dim, integral_dim=2)
+        self.R = SumPoolOperator(
+            size=self.spatial_increase, channels=self.n_lambdas, device=self.device
+        )
+
+        # Get the masks on input tensor to not optimize the background noise
+        self.spc_mask, self.cmos_mask = self._get_masks()
+
+        # Mask
+        if self.mask_noise:
+            self.spc = self.spc * self.spc_mask.float()
+            self.cmos = self.cmos * self.cmos_mask.float()
+
+        self.spc_mask = self.spc_mask.squeeze(0)
+
+        # Normalize the energy of the input data (on the mask if necessary)
+        self.spc = self.normalize_energy(self.spc, total_energy)
+        self.cmos = self.normalize_energy(self.cmos, total_energy)
+
+        # Initialize the parameters
+        self.x = self._initialize()
+        if self.mask_noise:
+            self.x[:, :, ~self.cmos_mask] = 0.0
+        self.x = self.normalize_energy(self.x, total_energy)
+
+    def __call__(self, *args, **kwargs):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+    @staticmethod
+    def normalize_energy(tensor, total_energy=1):
+        return total_energy * tensor / tensor.sum()
+
+    def _initialize(self):
+        torch.manual_seed(self.seed)
+        if self.init_type == "random":
+            x = (self.cmos.min() - self.cmos.max()) * torch.rand(
+                self.x_shape, device=self.device
+            ) + self.cmos.max()
+        elif self.init_type == "zeros":
+            x = torch.zeros(self.x_shape).to(self.device)
+        elif self.init_type == "baseline":
+            x = baseline(self.cmos, self.spc, device="cpu", return_numpy=False).to(
+                self.device
             )
-            lambda_time_loss = weights["lambda_time"] * mse_loss(
-                spc[:, :, spc_mask], resized_x[:, :, spc_mask]
+        elif self.init_type == "upscaled_spc":
+            x = resize(
+                self.spc,
+                size=self.cmos.shape[-2:],
+                interpolation=InterpolationMode.NEAREST,
             )
-
+            x = x.unsqueeze(2).repeat(1, 1, self.cmos.shape[0], 1, 1)
         else:
-            spatial_loss = weights["spatial"] * mse_loss(
-                cmos.flatten(), x.sum(dim=(0, 1)).flatten()
+            raise ValueError("Invalid initialization type.")
+        return x
+
+    def _mask_gradients(self):
+        self.x.grad[:, :, ~self.cmos_mask] = 0.0
+
+    def _get_masks(self):
+        cmos_mask = self.cmos > (0.05 * self.cmos.max())
+        spc_mask = resize(
+            cmos_mask.any(dim=0).unsqueeze(0).float(),
+            size=[self.spc.shape[-2], self.spc.shape[-1]],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=False,
+        ).bool()
+        return spc_mask, cmos_mask
+
+
+class FusionAdam(Fusion):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __call__(
+        self,
+        weights,
+        lr,
+        iterations,
+        non_neg=False,
+        return_numpy=True,
+    ):
+
+        history = np.zeros((iterations, len(weights) + 1))
+
+        self.x = torch.nn.Parameter(self.x, requires_grad=True)
+        optimizer = torch.optim.Adam([self.x], lr=lr, amsgrad=False)
+
+        for i in (progress_bar := tqdm(range(iterations))):
+            optimizer.zero_grad()
+
+            # Computing losses
+            if self.mask_noise:
+                x1 = self.cmos[self.cmos_mask]
+                x2 = self.T(self.S(self.x))[0, 0, self.cmos_mask]
+                spatial_loss = weights["spatial"] * squared_l2(x1 - x2)
+
+                x1 = self.spc[:, :, self.spc_mask]
+                x2 = self.R(self.D(self.x)).squeeze(2)[:, :, self.spc_mask]
+                lambda_time_loss = weights["lambda_time"] * squared_l2(x1 - x2)
+
+            else:
+                x1 = self.cmos.flatten()
+                x2 = self.T(self.S(self.x)).flatten()
+                spatial_loss = weights["spatial"] * squared_l2(x1 - x2)
+
+                x1 = self.spc.flatten()
+                x2 = self.R(self.D(self.x)).squeeze(2).flatten()
+                lambda_time_loss = weights["lambda_time"] * squared_l2(x1 - x2)
+
+            # Global has no spatial dimension, so no need to mask.
+            # x1 = self.spc.sum(dim=(2, 3)).flatten()
+            # x2 = self.x.sum(dim=(2, 3, 4)).flatten()
+            # global_loss = weights["global"] * squared_l2(x1 - x2)
+
+            if weights["low_rank"] > 0.0:
+                # Ideally, wavelength-time map should be low rank
+                low_rank_loss = weights["low_rank"] * self.x.sum(dim=(2, 3, 4)).T.norm(
+                    "nuc"
+                )
+            else:
+                low_rank_loss = 0
+
+            loss = spatial_loss + lambda_time_loss + low_rank_loss  # + global_loss
+            loss.backward()
+
+            if self.mask_noise:
+                self._mask_gradients()
+            optimizer.step()
+
+            if non_neg:
+                with torch.no_grad():
+                    self.x.copy_(self.x.data.clamp(min=0))
+
+            progress_bar.set_description(
+                f"Spatial: {spatial_loss.item():.2E} | "
+                f"Lambda Time: {lambda_time_loss.item():.2E} | "
+                # f"Global: {global_loss.item():.2E} | "
+                # f"Low Rank: {low_rank_loss.item():.2E} | "
+                f"Total: {loss.item():.2E}"
+                # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
             )
-            lambda_time_loss = weights["lambda_time"] * mse_loss(
-                spc.flatten(), resized_x.flatten()
+
+            history[i] = np.array(
+                [
+                    spatial_loss.item(),
+                    lambda_time_loss.item(),
+                    low_rank_loss.item(),
+                    loss.item(),
+                    # global_loss.item(),
+                ]
             )
 
-        # Global has no spatial dimension, so no need to mask.
-        global_loss = weights["global"] * mse_loss(
-            spc.sum(dim=(2, 3)).flatten(),
-            x.sum(dim=(2, 3, 4)).flatten(),
-        )
+        _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
+        for i, title in enumerate(["Spatial", "Lambda Time", "Total"]):
+            ax[i].plot(history[:, i])
+            ax[i].set_title(title)
+            ax[i].set_yscale("log")
+        plt.tight_layout()
+        plt.show()
 
-        loss = spatial_loss + lambda_time_loss + global_loss
-        if weights["l2_regularization"] > 0:
-            loss = loss + weights["l2_regularization"] * x.norm(2)
-        loss.backward()
+        if return_numpy:
+            return (
+                self.x.detach().cpu().numpy(),
+                self.spc.detach().cpu().numpy(),
+                self.cmos.detach().cpu().numpy(),
+            )
+        else:
+            return self.x, self.spc, self.cmos
 
-        log = (
-            f"Spatial: {spatial_loss.item():.2E} | "
-            f"Lambda Time: {lambda_time_loss.item():.2E} | "
-            f"Global: {global_loss.item():.2E} | "
-            # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
-        )
-        spatial_loss_history.append(spatial_loss.item())
-        lambda_time_loss_history.append(lambda_time_loss.item())
-        global_loss_history.append(global_loss.item())
 
-        if mask_gradients:
-            _mask_gradients(x, cmos_mask)
-        optimizer.step()
+class FusionCG(Fusion):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        # Clamping the values to be non-negative
-        if non_neg:
-            with torch.no_grad():
-                x.copy_(x.data.clamp(min=0))
+    def __call__(
+        self,
+        iterations,
+        tol=1e-5,
+        eps=1e-10,
+        return_numpy=True,
+    ):
+        history = []
 
-        progress_bar.set_description(log)
+        A = lambda x: self.T.A_adjoint(
+            self.S.A_adjoint(self.S(self.T(x)))
+        ) + self.D.A_adjoint(self.R.A_adjoint(self.R(self.D(x))))
+        b = self.T.A_adjoint(
+            self.S.A_adjoint(self.cmos.unsqueeze(0).unsqueeze(0))
+        ) + self.D.A_adjoint(self.R.A_adjoint(self.spc.unsqueeze(2)))
 
-    _, ax = plt.subplots(1, 3, figsize=(15, 5))
-    ax[0].plot(spatial_loss_history)
-    ax[0].set_title("Spatial Loss")
-    ax[0].set_yscale("log")
-    ax[1].plot(lambda_time_loss_history)
-    ax[1].set_title("Lambda Time Loss")
-    ax[1].set_yscale("log")
-    ax[2].plot(global_loss_history)
-    ax[2].set_title("Global Loss")
-    ax[2].set_yscale("log")
-    plt.show()
+        # Slightly modified version of the conjugate gradient method from:
+        # https://deepinv.github.io/deepinv/_modules/deepinv/optim/utils.html#conjugate_gradient
 
-    if return_numpy:
-        return (
-            x.detach().cpu().numpy(),
-            spc.detach().cpu().numpy(),
-            cmos.detach().cpu().numpy(),
-        )
-    else:
-        return x, spc, cmos
+        r = b - A(self.x)
+        p = r
+        rsold = torch.dot(r.flatten(), r.flatten())
+
+        for _ in (progress_bar := tqdm(range(int(iterations)))):
+            Ap = A(p)
+            alpha = rsold / (torch.dot(p.flatten(), Ap.flatten()) + eps)
+            self.x = self.x + p * alpha
+            r = r - Ap * alpha
+            rsnew = torch.dot(r.flatten(), r.flatten())
+            history.append(rsnew.item())
+            assert rsnew.isfinite(), "Conjugate gradient diverged"
+            if rsnew < tol**2:
+                break
+            p = r + p * (rsnew / (rsold + eps))
+            rsold = rsnew
+
+            progress_bar.set_description(f"Residual: {rsnew.item():.2E}")
+
+        _, ax = plt.subplots(1, 1, figsize=(4, 4))
+        ax.plot(history)
+        ax.set_title("Residual")
+        ax.set_yscale("log")
+        plt.tight_layout()
+        plt.show()
+
+        if return_numpy:
+            return (
+                self.x.cpu().numpy(),
+                self.spc.cpu().numpy(),
+                self.cmos.cpu().numpy(),
+            )
+        else:
+            return self.x, self.spc, self.cmos
