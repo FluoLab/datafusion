@@ -221,15 +221,7 @@ class FusionAdam(Fusion):
             # x2 = self.x.sum(dim=(2, 3, 4)).flatten()
             # global_loss = weights["global"] * squared_l2(x1 - x2)
 
-            if weights["low_rank"] > 0.0:
-                # Ideally, wavelength-time map should be low rank
-                low_rank_loss = weights["low_rank"] * self.x.sum(dim=(2, 3, 4)).T.norm(
-                    "nuc"
-                )
-            else:
-                low_rank_loss = 0
-
-            loss = spatial_loss + lambda_time_loss + low_rank_loss  # + global_loss
+            loss = spatial_loss + lambda_time_loss  # + global_loss
             loss.backward()
 
             if self.mask_noise:
@@ -244,7 +236,6 @@ class FusionAdam(Fusion):
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Lambda Time: {lambda_time_loss.item():.2E} | "
                 # f"Global: {global_loss.item():.2E} | "
-                # f"Low Rank: {low_rank_loss.item():.2E} | "
                 f"Total: {loss.item():.2E}"
                 # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
             )
@@ -253,7 +244,6 @@ class FusionAdam(Fusion):
                 [
                     spatial_loss.item(),
                     lambda_time_loss.item(),
-                    low_rank_loss.item(),
                     loss.item(),
                     # global_loss.item(),
                 ]
