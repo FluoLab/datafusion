@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torchvision.transforms import Resize, InterpolationMode
 
-from tqdm import tqdm
+from tqdm.autonotebook import tqdm
 
 
 def baseline(cmos, spc, device, return_numpy=True):

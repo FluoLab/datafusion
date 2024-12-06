@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import scipy as sp
 import matlab.engine
-from tqdm import tqdm
+from tqdm.autonotebook import tqdm
 from scipy.linalg import lstsq
 from scipy.optimize import curve_fit
 from matplotlib.colors import hsv_to_rgb
