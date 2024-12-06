@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import deepinv as dinv
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+from tqdm.autonotebook import tqdm
 from torch.nn.functional import conv2d, conv_transpose2d
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize
@@ -12,26 +12,6 @@ from baseline import baseline
 
 def squared_l2(x):
     return torch.sum(x**2)
-
-
-def fusion_loss_test(x, spc, cmos):
-    if isinstance(spc, np.ndarray):
-        spc = torch.from_numpy(spc.astype(np.float32))
-    if isinstance(cmos, np.ndarray):
-        cmos = torch.from_numpy(cmos.astype(np.float32))
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x.astype(np.float32))
-
-    T = IntegralOperator(size=spc.shape[0], integral_dim=0)
-    S = IntegralOperator(size=spc.shape[1], integral_dim=1)
-    D = IntegralOperator(size=cmos.shape[0], integral_dim=2)
-    R = SumPoolOperator(
-        size=cmos.shape[-1] // spc.shape[-1], channels=spc.shape[1], device=x.device
-    )
-
-    spatial_loss = squared_l2(cmos.flatten() - T(S(x)).flatten())
-    lambda_time_loss = squared_l2(spc.flatten() - R(D(x)).flatten())
-    return 0.5 * spatial_loss.item(), 0.5 * lambda_time_loss.item()
 
 
 class IntegralOperator(dinv.physics.LinearPhysics):
@@ -75,7 +55,9 @@ class Fusion:
         self,
         spc,
         cmos,
+        weights,
         init_type,
+        tol=1e-6,
         mask_noise=False,
         total_energy=1,
         device="cpu",
@@ -88,7 +70,9 @@ class Fusion:
             # cmos: (z,x,y)
             self.cmos = torch.from_numpy(cmos.astype(np.float32)).to(device)
 
+        self.weights = weights
         self.init_type = init_type
+        self.tol = tol
         self.seed = seed
         self.mask_noise = mask_noise
         self.device = device
@@ -104,6 +88,7 @@ class Fusion:
             cmos.shape[2],
         )
         self.spatial_increase = cmos.shape[-1] // spc.shape[-1]
+        self.prev_x = None
 
         self.T = IntegralOperator(size=self.n_times, integral_dim=0)
         self.S = IntegralOperator(size=self.n_lambdas, integral_dim=1)
@@ -139,6 +124,38 @@ class Fusion:
     def normalize_energy(tensor, total_energy=1):
         return total_energy * tensor / tensor.sum()
 
+    def loss(self):
+        if self.mask_noise:
+            x1 = self.cmos[self.cmos_mask]
+            x2 = self.T(self.S(self.x))[0, 0, self.cmos_mask]
+            spatial_loss = self.weights["spatial"] * squared_l2(x1 - x2)
+
+            x1 = self.spc[:, :, self.spc_mask]
+            x2 = self.R(self.D(self.x)).squeeze(2)[:, :, self.spc_mask]
+            lambda_time_loss = self.weights["lambda_time"] * squared_l2(x1 - x2)
+
+        else:
+            x1 = self.cmos.flatten()
+            x2 = self.T(self.S(self.x)).flatten()
+            spatial_loss = self.weights["spatial"] * squared_l2(x1 - x2)
+
+            x1 = self.spc.flatten()
+            x2 = self.R(self.D(self.x)).squeeze(2).flatten()
+            lambda_time_loss = self.weights["lambda_time"] * squared_l2(x1 - x2)
+
+        # There is a possible global loss that can be added to the total loss.
+        # We notice that adding it does not improve the results.
+        # Global has no spatial dimension, so no need to mask.
+        # x1 = self.spc.sum(dim=(2, 3)).flatten()
+        # x2 = self.x.sum(dim=(2, 3, 4)).flatten()
+        # global_loss = weights["global"] * squared_l2(x1 - x2)
+
+        return spatial_loss, lambda_time_loss
+
+    def sensitivity(self):
+        return torch.linalg.vector_norm(self.x.flatten() - self.prev_x.flatten())
+
+
     def _initialize(self):
         torch.manual_seed(self.seed)
         if self.init_type == "random":
@@ -148,9 +165,8 @@ class Fusion:
         elif self.init_type == "zeros":
             x = torch.zeros(self.x_shape).to(self.device)
         elif self.init_type == "baseline":
-            x = baseline(self.cmos, self.spc, device="cpu", return_numpy=False).to(
-                self.device
-            )
+            x = baseline(self.cmos, self.spc, device="cpu", return_numpy=False)
+            x = x.to(self.device)
         elif self.init_type == "upscaled_spc":
             x = resize(
                 self.spc,
@@ -158,6 +174,7 @@ class Fusion:
                 interpolation=InterpolationMode.NEAREST,
             )
             x = x.unsqueeze(2).repeat(1, 1, self.cmos.shape[0], 1, 1)
+            x = x.to(self.device)
         else:
             raise ValueError("Invalid initialization type.")
         return x
@@ -182,45 +199,22 @@ class FusionAdam(Fusion):
 
     def __call__(
         self,
-        weights,
         lr,
         iterations,
         non_neg=False,
         return_numpy=True,
     ):
 
-        history = np.zeros((iterations, len(weights) + 1))
+        history = np.zeros((iterations, len(self.weights) + 1))
 
         self.x = torch.nn.Parameter(self.x, requires_grad=True)
         optimizer = torch.optim.Adam([self.x], lr=lr, amsgrad=False)
 
         for i in (progress_bar := tqdm(range(iterations))):
+            self.prev_x = self.x.detach().clone()
             optimizer.zero_grad()
 
-            # Computing losses
-            if self.mask_noise:
-                x1 = self.cmos[self.cmos_mask]
-                x2 = self.T(self.S(self.x))[0, 0, self.cmos_mask]
-                spatial_loss = weights["spatial"] * squared_l2(x1 - x2)
-
-                x1 = self.spc[:, :, self.spc_mask]
-                x2 = self.R(self.D(self.x)).squeeze(2)[:, :, self.spc_mask]
-                lambda_time_loss = weights["lambda_time"] * squared_l2(x1 - x2)
-
-            else:
-                x1 = self.cmos.flatten()
-                x2 = self.T(self.S(self.x)).flatten()
-                spatial_loss = weights["spatial"] * squared_l2(x1 - x2)
-
-                x1 = self.spc.flatten()
-                x2 = self.R(self.D(self.x)).squeeze(2).flatten()
-                lambda_time_loss = weights["lambda_time"] * squared_l2(x1 - x2)
-
-            # Global has no spatial dimension, so no need to mask.
-            # x1 = self.spc.sum(dim=(2, 3)).flatten()
-            # x2 = self.x.sum(dim=(2, 3, 4)).flatten()
-            # global_loss = weights["global"] * squared_l2(x1 - x2)
-
+            spatial_loss, lambda_time_loss = self.loss()
             loss = spatial_loss + lambda_time_loss  # + global_loss
             loss.backward()
 
@@ -232,13 +226,19 @@ class FusionAdam(Fusion):
                 with torch.no_grad():
                     self.x.copy_(self.x.data.clamp(min=0))
 
+            sensitivity = self.sensitivity()
+
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Lambda Time: {lambda_time_loss.item():.2E} | "
                 # f"Global: {global_loss.item():.2E} | "
-                f"Total: {loss.item():.2E}"
+                f"Total: {loss.item():.2E} | "
+                f"Sensitivity: {sensitivity.item():.2E}"
                 # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
             )
+
+            if sensitivity < self.tol:
+                break
 
             history[i] = np.array(
                 [
@@ -251,7 +251,7 @@ class FusionAdam(Fusion):
 
         _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
         for i, title in enumerate(["Spatial", "Lambda Time", "Total"]):
-            ax[i].plot(history[:, i])
+            ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
             ax[i].set_title(title)
             ax[i].set_yscale("log")
         plt.tight_layout()
@@ -274,11 +274,10 @@ class FusionCG(Fusion):
     def __call__(
         self,
         iterations,
-        tol=1e-5,
         eps=1e-10,
         return_numpy=True,
     ):
-        history = []
+        history = np.zeros((iterations, len(self.weights) + 2))
 
         A = lambda x: self.T.A_adjoint(
             self.S.A_adjoint(self.S(self.T(x)))
@@ -294,25 +293,52 @@ class FusionCG(Fusion):
         p = r
         rsold = torch.dot(r.flatten(), r.flatten())
 
-        for _ in (progress_bar := tqdm(range(int(iterations)))):
+        for i in (progress_bar := tqdm(range(int(iterations)))):
+            self.prev_x = self.x.clone()
+
             Ap = A(p)
             alpha = rsold / (torch.dot(p.flatten(), Ap.flatten()) + eps)
             self.x = self.x + p * alpha
             r = r - Ap * alpha
             rsnew = torch.dot(r.flatten(), r.flatten())
-            history.append(rsnew.item())
             assert rsnew.isfinite(), "Conjugate gradient diverged"
-            if rsnew < tol**2:
+            # if rsnew < tol**2:
+            #     break
+            # We break based on sensitivity
+            sensitivity = self.sensitivity()
+            if sensitivity < self.tol:
                 break
+
             p = r + p * (rsnew / (rsold + eps))
             rsold = rsnew
 
-            progress_bar.set_description(f"Residual: {rsnew.item():.2E}")
+            spatial_loss, lambda_time_loss = self.loss()
+            loss = spatial_loss + lambda_time_loss
+            progress_bar.set_description(
+                f"Spatial: {spatial_loss.item():.2E} | "
+                f"Lambda Time: {lambda_time_loss.item():.2E} | "
+                f"Total: {loss.item():.2E} | "
+                f"Sensitivity: {sensitivity:.2E} | "
+                f"Residual: {rsnew.item():.2E}"
+                # f"Global: {global_loss.item():.2E} | "
+                # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
+            )
 
-        _, ax = plt.subplots(1, 1, figsize=(4, 4))
-        ax.plot(history)
-        ax.set_title("Residual")
-        ax.set_yscale("log")
+            history[i] = np.array(
+                [
+                    spatial_loss.item(),
+                    lambda_time_loss.item(),
+                    loss.item(),
+                    rsnew.item(),
+                    # global_loss.item(),
+                ]
+            )
+
+        _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
+        for i, title in enumerate(["Spatial", "Lambda Time", "Total", "Residual"]):
+            ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
+            ax[i].set_title(title)
+            ax[i].set_yscale("log")
         plt.tight_layout()
         plt.show()
 
