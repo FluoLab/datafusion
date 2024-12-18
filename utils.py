@@ -347,3 +347,15 @@ def get_discrete_time_decay(tensor, t):
         tensor.shape[4],
     )
     return tensor
+
+
+def sam(vec1, vec2):
+    return np.arccos(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+
+
+def cosine_similarity(vec1, vec2):
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
+
+def rmse(vec1, vec2):
+    return np.sqrt(np.mean((vec1 - vec2) ** 2))
