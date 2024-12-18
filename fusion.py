@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import deepinv as dinv
 import matplotlib.pyplot as plt
 from tqdm.autonotebook import tqdm
 from torch.nn.functional import conv2d, conv_transpose2d
@@ -14,40 +13,44 @@ def squared_l2(x):
     return torch.sum(x**2)
 
 
-class IntegralOperator(dinv.physics.LinearPhysics):
-    def __init__(self, size=1, integral_dim=0, **kwargs):
-        super().__init__(**kwargs)
+class IntegralOperator:
+    def __init__(self, size=1, integral_dim=0):
         self.size = size
         self.integral_dim = integral_dim
 
-    def A(self, x, **kwargs):
+    def A(self, x):
         self.size = x.shape[self.integral_dim]
         return x.sum(dim=self.integral_dim, keepdim=True)
 
-    def A_adjoint(self, y, **kwargs):
+    def A_adjoint(self, y):
         return y.repeat_interleave(self.size, dim=self.integral_dim) / self.size
 
+    def __call__(self, *args):
+        return self.A(*args)
 
-class SumPoolOperator(dinv.physics.LinearPhysics):
-    def __init__(self, size=4, channels=16, device="cpu", **kwargs):
-        super().__init__(**kwargs)
+
+class SumPoolOperator:
+    def __init__(self, size=4, channels=16, device="cpu"):
         self.size = size
         self.kernel = torch.ones(channels, 1, size, size, device=device)
         self.channels = channels
 
-    def A(self, x, **kwargs):
+    def A(self, x):
         x = x.squeeze(2)
         y = conv2d(x, self.kernel, stride=self.size, groups=self.channels, bias=None)
         y = y.unsqueeze(2)
         return y
 
-    def A_adjoint(self, y, **kwargs):
+    def A_adjoint(self, y):
         y = y.squeeze(2)
         x = conv_transpose2d(
             y, self.kernel, stride=self.size, groups=self.channels, bias=None
         )
         x = x.unsqueeze(2)
         return x / self.size**2
+
+    def __call__(self, *args):
+        return self.A(*args)
 
 
 class Fusion:
@@ -216,6 +219,10 @@ class FusionAdam(Fusion):
 
             spatial_loss, lambda_time_loss = self.loss()
             loss = spatial_loss + lambda_time_loss  # + global_loss
+
+            # times = self.x.sum(dim=1).reshape(self.x.shape[0], -1)
+            # regularization = 1e-3 * torch.linalg.svdvals(times).sum()
+            # loss += regularization
             loss.backward()
 
             if self.mask_noise:
@@ -231,6 +238,7 @@ class FusionAdam(Fusion):
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Lambda Time: {lambda_time_loss.item():.2E} | "
+                # f"Reg: {regularization.item():.2E} | "
                 # f"Global: {global_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
                 f"Sensitivity: {sensitivity.item():.2E}"
@@ -321,7 +329,6 @@ class FusionCG(Fusion):
                 f"Sensitivity: {sensitivity:.2E} | "
                 f"Residual: {rsnew.item():.2E}"
                 # f"Global: {global_loss.item():.2E} | "
-                # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
             )
 
             history[i] = np.array(
