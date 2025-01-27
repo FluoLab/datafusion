@@ -304,7 +304,7 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
                         mono_exponential_decay_numpy,
                         t,
                         tensor[:, zi, xi, yi] / max_voxel,
-                        bounds=([0.0, 1e-6, 0.0], [1.0, max_tau, 0.1]),
+                        bounds=([0.0, 1e-6, -0.1], [1.0, max_tau, 0.1]),
                         p0=(0.5, 2.0, 1e-4),
                         maxfev=5000,
                     )
@@ -319,7 +319,9 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
     tau_max = tau_out.max()
     for zi in range(tensor.shape[1]):
         # h = (260 / 360) * (1 - (tau_out[zi] - tau_min) / (tau_max - tau_min))
-        h = (260 / 360) * (1 - (tau_out[zi] - tau_clip[0]) / (tau_clip[1] - tau_clip[0]))
+        h = (260 / 360) * (
+            1 - (tau_out[zi] - tau_clip[0]) / (tau_clip[1] - tau_clip[0])
+        )
         lifetime_volume[zi] = hsv_to_rgb(
             np.stack([h, np.ones_like(tau_out[zi]), a_out[zi]], axis=-1)
         )
