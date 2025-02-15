@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datafusion"
+version = "0.0.1"
+authors = [
+    { name = "Serban Cristian Tudosie", email = "sc.tudosie.23@ucl.ac.uk" },
+    { name = "Valerio Gandolfi", email = "valerio.gandolfi@polimi.it" },
+    { name = "Federico Simoni", email = "federico.simoni@polimi.it" },
+    { name = "Shivaprasad Varakkoth", email = "shivaprasad.varakkoth@polimi.it" },
+]
+description = "Data fusion for high resolution lambdaFLIM imaging."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Utilities",
+    "Operating System :: Unix",
+    "Operating System :: MacOS",
+    "Operating System :: Windows",
+]
+dependencies = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/FluoLab/datafusion"
+"Bug Tracker" = "https://github.com/FluoLab/datafusion/issues"
+"Source" = "https://github.com/FluoLab/datafusion"
+
+[tool.setuptools.packages]
+find = {namespaces = false}
+
+[tool.black]
+line-length = 100

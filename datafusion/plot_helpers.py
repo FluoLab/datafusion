@@ -1,7 +1,7 @@
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from scipy.optimize import curve_fit
 
-from utils import mono_exponential_decay_numpy as decay
+from datafusion.utils import mono_exponential_decay_numpy as decay
 
 def add_z_text(ax, z_index, pos=(0.95, 0.95), font_size=12):
     ax.text(

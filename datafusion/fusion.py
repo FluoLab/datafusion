@@ -6,7 +6,7 @@ from torch.nn.functional import conv2d, conv_transpose2d
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize
 
-from baseline import baseline
+from datafusion.baseline import baseline
 
 
 def squared_l2(x):
@@ -56,15 +56,15 @@ class SumPoolOperator:
 class Fusion:
     def __init__(
         self,
-        spc,
-        cmos,
-        weights,
-        init_type,
-        tol=1e-6,
-        mask_noise=False,
-        total_energy=1,
-        device="cpu",
-        seed=42,
+        spc: np.ndarray | torch.Tensor,
+        cmos: np.ndarray | torch.Tensor,
+        weights: dict,
+        init_type: str,
+        tol: float | None = 1e-6,
+        mask_noise: bool = False,
+        total_energy: float = 1.0,
+        device: str = "cpu",
+        seed: int = 42,
     ):
         if isinstance(spc, np.ndarray):
             # spc: (time,lambda,x,y)
@@ -158,7 +158,6 @@ class Fusion:
     def sensitivity(self):
         return torch.linalg.vector_norm(self.x.flatten() - self.prev_x.flatten())
 
-
     def _initialize(self):
         torch.manual_seed(self.seed)
         if self.init_type == "random":
@@ -202,19 +201,19 @@ class FusionAdam(Fusion):
 
     def __call__(
         self,
-        lr,
-        iterations,
-        non_neg=False,
-        return_numpy=True,
+        lr: float,
+        max_iterations: int,
+        non_neg: bool = False,
+        return_numpy: bool = True,
     ):
 
-        history = np.zeros((iterations, len(self.weights) + 1))
+        history = np.zeros((max_iterations, len(self.weights) + 1))
 
         self.x = torch.nn.Parameter(self.x, requires_grad=True)
         optimizer = torch.optim.Adam([self.x], lr=lr, amsgrad=False)
 
-        for i in (progress_bar := tqdm(range(iterations))):
-            self.prev_x = self.x.detach().clone()
+        for i in (progress_bar := tqdm(range(max_iterations))):
+            self.prev_x = self.x.detach().clone() if self.tol is not None else None
             optimizer.zero_grad()
 
             spatial_loss, lambda_time_loss = self.loss()
@@ -233,7 +232,7 @@ class FusionAdam(Fusion):
                 with torch.no_grad():
                     self.x.copy_(self.x.data.clamp(min=0))
 
-            sensitivity = self.sensitivity()
+            sensitivity = self.sensitivity().item() if self.tol is not None else None
 
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
@@ -241,11 +240,11 @@ class FusionAdam(Fusion):
                 # f"Reg: {regularization.item():.2E} | "
                 # f"Global: {global_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
-                f"Sensitivity: {sensitivity.item():.2E}"
+                f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
                 # f"Grad Norm: {x.grad.data.norm(2).item():.2E}"
             )
 
-            if sensitivity < self.tol:
+            if sensitivity is not None and sensitivity < self.tol:
                 break
 
             history[i] = np.array(
@@ -281,11 +280,11 @@ class FusionCG(Fusion):
 
     def __call__(
         self,
-        iterations,
-        eps=1e-10,
-        return_numpy=True,
+        max_iterations: int,
+        eps: float = 1e-10,
+        return_numpy: bool = True,
     ):
-        history = np.zeros((iterations, len(self.weights) + 2))
+        history = np.zeros((max_iterations, len(self.weights) + 2))
 
         A = lambda x: self.T.A_adjoint(
             self.S.A_adjoint(self.S(self.T(x)))
@@ -301,8 +300,8 @@ class FusionCG(Fusion):
         p = r
         rsold = torch.dot(r.flatten(), r.flatten())
 
-        for i in (progress_bar := tqdm(range(int(iterations)))):
-            self.prev_x = self.x.clone()
+        for i in (progress_bar := tqdm(range(int(max_iterations)))):
+            self.prev_x = self.x.clone() if self.tol is not None else None
 
             Ap = A(p)
             alpha = rsold / (torch.dot(p.flatten(), Ap.flatten()) + eps)
@@ -312,9 +311,10 @@ class FusionCG(Fusion):
             assert rsnew.isfinite(), "Conjugate gradient diverged"
             # if rsnew < tol**2:
             #     break
-            # We break based on sensitivity
-            sensitivity = self.sensitivity()
-            if sensitivity < self.tol:
+
+            # We break based on sensitivity or max iterations
+            sensitivity = self.sensitivity() if self.tol is not None else None
+            if self.tol is not None and sensitivity < self.tol:
                 break
 
             p = r + p * (rsnew / (rsold + eps))
@@ -326,7 +326,7 @@ class FusionCG(Fusion):
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Lambda Time: {lambda_time_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
-                f"Sensitivity: {sensitivity:.2E} | "
+                f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
                 f"Residual: {rsnew.item():.2E}"
                 # f"Global: {global_loss.item():.2E} | "
             )

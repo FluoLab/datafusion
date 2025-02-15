@@ -6,38 +6,16 @@ import h5py
 import torch
 import numpy as np
 import scipy as sp
-import matlab.engine
 from tqdm.autonotebook import tqdm
 from scipy.linalg import lstsq
 from scipy.optimize import curve_fit
 from matplotlib.colors import hsv_to_rgb
 
 FILE_PATH = Path(__file__)
-RESOURCES_PATH = FILE_PATH.parent / "resources"
-FIGURES_PATH = FILE_PATH.parent / "figures"
-TVAL3_PATH = FILE_PATH.parent / "vendored" / "TVAL3"
-
-
-class TVAL3:
-    def __init__(self, img_shape: tuple[int, int]):
-        self.eng = matlab.engine.start_matlab()
-        self.eng.cd(str(TVAL3_PATH), nargout=0)
-        self.eng.addpath(self.eng.genpath(str(TVAL3_PATH)))
-        self.img_shape = img_shape
-
-    def __call__(
-        self,
-        forward_op: np.ndarray,
-        measurements: np.ndarray,
-    ) -> tuple[np.ndarray, any]:
-        reconstruction = self.eng.TVAL3(
-            np.ascontiguousarray(forward_op, dtype=np.float32),
-            np.ascontiguousarray(measurements.reshape(-1, 1), dtype=np.float32),
-            self.img_shape[0],
-            self.img_shape[1],
-        )
-        # Returns tuple to match the nnls and lstsq functions in scipy
-        return np.abs(np.array(reconstruction)).flatten().astype(np.float32), 0
+PROJECT_PATH = FILE_PATH.parent.parent
+RESOURCES_PATH = PROJECT_PATH / "resources"
+FIGURES_PATH = PROJECT_PATH / "figures"
+DF_PATH = PROJECT_PATH / "datafusion"
 
 
 # L16 at 610nm: wavelengths and sRGB values (for old colouring scheme)
