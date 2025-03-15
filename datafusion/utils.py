@@ -256,13 +256,13 @@ def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
     return srgb_volume
 
 
-def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1):
+def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1, return_all=False):
     lifetime_volume = np.zeros(
         (tensor.shape[1], tensor.shape[2], tensor.shape[3], 3), dtype=np.float32
     )
     a_out = np.zeros(tensor.shape[1:], dtype=np.float32)
     tau_out = np.zeros(tensor.shape[1:], dtype=np.float32)
-    # c_out = np.zeros(tensor.shape[1:], dtype=np.float32)
+    c_out = np.zeros(tensor.shape[1:], dtype=np.float32)
 
     intensity = tensor.sum(axis=0)
     intensity /= intensity.max()
@@ -274,7 +274,7 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
                 if intensity[zi, xi, yi] < noise_thr:
                     a_out[zi, xi, yi] = 0
                     tau_out[zi, xi, yi] = 0
-                    # c_out[zi, xi, yi] = 0
+                    c_out[zi, xi, yi] = 0
 
                 else:
                     max_voxel = tensor[:, zi, xi, yi].max()
@@ -288,7 +288,7 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
                     )
                     a_out[zi, xi, yi] = params[0] * max_voxel
                     tau_out[zi, xi, yi] = params[1]
-                    # c_out[zi, xi, yi] = params[2]
+                    c_out[zi, xi, yi] = params[2]
 
     a_out /= a_out.max()
     if tau_clip is not None:
@@ -303,6 +303,9 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
         lifetime_volume[zi] = hsv_to_rgb(
             np.stack([h, np.ones_like(tau_out[zi]), a_out[zi]], axis=-1)
         )
+
+    if return_all:
+        return a_out, tau_out, c_out
     return lifetime_volume, tau_min, tau_max
 
 
