@@ -62,7 +62,7 @@ class MonoDecayOperator:
         # x[0] is the amplitude
         # x[1] is the lifetime
         # x[2] is the background
-        return x[0:1] * torch.exp(self.t / x[1:2] + self.eps) + x[2:3]
+        return x[0:1] * torch.exp(- self.t / (x[1:2] + self.eps)) + x[2:3]
 
     def __call__(self, *args):
         return self.A(*args)
