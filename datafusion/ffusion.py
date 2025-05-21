@@ -55,14 +55,14 @@ class SumPoolOperator:
 class MonoDecayOperator:
     def __init__(self, t: torch.Tensor):
         self.t = t.view(-1, 1, 1, 1, 1)
-        self.eps = 1e-7
+        self.eps = 1e-8
 
     def A(self, x):
         # x is assumed to be of shape (3, n_lambdas, z_dim, x_dim, y_dim)
         # x[0] is the amplitude
         # x[1] is the lifetime
         # x[2] is the background
-        return x[0:1] * torch.exp(- self.t / (x[1:2] + self.eps)) + x[2:3]
+        return x[0:1] * torch.exp(-self.t / (x[1:2] + self.eps)) + x[2:3]
 
     def __call__(self, *args):
         return self.A(*args)
@@ -129,7 +129,6 @@ class Fusion:
         self.spc_mask = self.spc_mask.squeeze(0)
 
         # Normalize the energy of the input data (on the mask if necessary)
-        # self.spc = self.spc + self.spc.min()
         self.spc = self.normalize_energy(self.spc, total_energy)
         self.cmos = self.normalize_energy(self.cmos, total_energy)
 
@@ -196,8 +195,8 @@ class Fusion:
             x[1] = torch.normal(2.0, 0.1, size=self.x_shape[1:]).to(self.device)
             x[2] = torch.normal(1e-4, 1e-6, size=self.x_shape[1:]).to(self.device)
             x[0] = torch.clamp(x[0], min=0)
-            x[1] = torch.clamp(x[1], min=1e-4, max=10)
-            x[2] = torch.clamp(x[2], min=0, max=0.2)
+            x[1] = torch.clamp(x[1], min=1e-6, max=10)
+            x[2] = torch.clamp(x[2], min=0, max=0.01)
 
         elif self.init_type == "zeros":
             x = torch.zeros(self.x_shape, dtype=torch.float32).to(self.device)
@@ -249,6 +248,11 @@ class FusionAdam(Fusion):
             if self.mask_noise:
                 self._mask_gradients()
             optimizer.step()
+
+            with torch.no_grad():
+                self.x[0].copy_(self.x[0].data.clamp(min=0))
+                self.x[1].copy_(self.x[1].data.clamp(min=1e-7, max=10))
+                self.x[2].copy_(self.x[2].data.clamp(min=0, max=0.1))
 
             if non_neg:
                 with torch.no_grad():

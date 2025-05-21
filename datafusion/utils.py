@@ -248,7 +248,7 @@ def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
     rgb_volume = np.apply_along_axis(lambda s: srgb_cmf @ s, 0, spectral_volume)
 
     # Discard (visual) intensity and scale to original (relative) photon intensity
-    rgb_volume /= rgb_volume.max(axis=0)
+    rgb_volume /= rgb_volume.max(axis=0) + 1e-6
     srgb_volume = linear_to_srgb(rgb_volume)
     srgb_volume *= intensity_volume / intensity_volume.max()
 
