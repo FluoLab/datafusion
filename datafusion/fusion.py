@@ -217,7 +217,7 @@ class Fusion:
 
             x1 = self.spc[:, :, self.spc_mask]
             x2 = self.R(self.D(self.x)).squeeze(2)[:, :, self.spc_mask]
-            lambda_time_loss = self.weights["lambda_time"] * squared_l2(x1 - x2)
+            spectro_temporal_loss = self.weights["spectro_temporal"] * squared_l2(x1 - x2)
 
         else:
             x1 = self.cmos.flatten()
@@ -226,7 +226,7 @@ class Fusion:
 
             x1 = self.spc.flatten()
             x2 = self.R(self.D(self.x)).squeeze(2).flatten()
-            lambda_time_loss = self.weights["lambda_time"] * squared_l2(x1 - x2)
+            spectro_temporal_loss = self.weights["spectro_temporal"] * squared_l2(x1 - x2)
 
         # There is a possible global loss that can be added to the total loss.
         # We notice that adding it does not improve the results.
@@ -236,7 +236,7 @@ class Fusion:
         # x2 = self.x.sum(dim=(2, 3, 4)).flatten()
         # global_loss = weights["global"] * squared_l2(x1 - x2)
 
-        return spatial_loss, lambda_time_loss
+        return spatial_loss, spectro_temporal_loss
 
     def sensitivity(self) -> torch.Tensor:
         """
@@ -322,8 +322,8 @@ class FusionAdam(Fusion):
             self.prev_x = self.x.detach().clone() if self.tol is not None else None
             optimizer.zero_grad()
 
-            spatial_loss, lambda_time_loss = self.loss()
-            loss = spatial_loss + lambda_time_loss
+            spatial_loss, spectro_temporal_loss = self.loss()
+            loss = spatial_loss + spectro_temporal_loss
 
             # times = self.x.sum(dim=1).reshape(self.x.shape[0], -1)
             # regularization = 1e-3 * torch.linalg.svdvals(times).sum()
@@ -342,7 +342,7 @@ class FusionAdam(Fusion):
 
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
-                f"Lambda Time: {lambda_time_loss.item():.2E} | "
+                f"Spectro Temporal: {spectro_temporal_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
                 f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
             )
@@ -353,14 +353,14 @@ class FusionAdam(Fusion):
             history[i] = np.array(
                 [
                     spatial_loss.item(),
-                    lambda_time_loss.item(),
+                    spectro_temporal_loss.item(),
                     loss.item(),
                     # global_loss.item(),
                 ]
             )
 
         _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
-        for i, title in enumerate(["Spatial", "Lambda Time", "Total"]):
+        for i, title in enumerate(["Spatial", "Spectro Temporal", "Total"]):
             ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
             ax[i].set_title(title)
             ax[i].set_yscale("log")
@@ -385,7 +385,7 @@ class FusionCG(Fusion):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.w1 = self.weights["spatial"]
-        self.w2 = self.weights["lambda_time"]
+        self.w2 = self.weights["spectro_temporal"]
 
     def __call__(
         self,
@@ -434,8 +434,6 @@ class FusionCG(Fusion):
             r = r - Ap * alpha
             rsnew = torch.dot(r.flatten(), r.flatten())
             assert rsnew.isfinite(), "Conjugate gradient diverged"
-            # if rsnew < tol**2:
-            #     break
 
             # We break based on sensitivity or max iterations
             sensitivity = self.sensitivity() if self.tol is not None else None
@@ -445,11 +443,11 @@ class FusionCG(Fusion):
             p = r + p * (rsnew / (rsold + eps))
             rsold = rsnew
 
-            spatial_loss, lambda_time_loss = self.loss()
-            loss = spatial_loss + lambda_time_loss
+            spatial_loss, spectro_temporal_loss = self.loss()
+            loss = spatial_loss + spectro_temporal_loss
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
-                f"Lambda Time: {lambda_time_loss.item():.2E} | "
+                f"Spectro Temporal: {spectro_temporal_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
                 f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
                 f"Residual: {rsnew.item():.2E}"
@@ -459,7 +457,7 @@ class FusionCG(Fusion):
             history[i] = np.array(
                 [
                     spatial_loss.item(),
-                    lambda_time_loss.item(),
+                    spectro_temporal_loss.item(),
                     loss.item(),
                     rsnew.item(),
                     # global_loss.item(),
@@ -467,7 +465,7 @@ class FusionCG(Fusion):
             )
 
         _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
-        for i, title in enumerate(["Spatial", "Lambda Time", "Total", "Residual"]):
+        for i, title in enumerate(["Spatial", "Spectro Temporal", "Total", "Residual"]):
             ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
             ax[i].set_title(title)
             ax[i].set_yscale("log")
