@@ -35,12 +35,12 @@ conda activate datafusion
 
 ## How does it work?
 
-Data fusion algorithms in this repo solve the following convex optimization problem:
+Data fusion algorithms in this repo solve the following convex optimization problem:  
 $$
 \underset{\mathbf{X}}{\arg\min} \quad \mathcal{L}(\mathbf{X}) =
 \frac{w_1}{2}\|ST\mathbf{X} - \mathbf{Y}_{cmos}\|_2^2 +
 \frac{w_2}{2}\|RD\mathbf{X} - \mathbf{Y}_{spc}\|_2^2,
-$$
+$$  
 where:
 
 * $\mathbf{X}$ is the 5D fluorescence time-resolved multispectral volume we are reconstructing
