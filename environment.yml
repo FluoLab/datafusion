@@ -20,4 +20,5 @@ dependencies:
   - h5py
 
   - pip:
+      - deepinv
       - "-e ."

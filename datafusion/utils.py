@@ -1,3 +1,4 @@
+import requests
 from typing import Literal
 from pathlib import Path
 from copy import deepcopy
@@ -7,7 +8,8 @@ import h5py
 import torch
 import numpy as np
 import scipy as sp
-from tqdm.autonotebook import tqdm
+import skimage as ski
+from tqdm.auto import tqdm
 from scipy.linalg import lstsq
 from scipy.optimize import curve_fit
 from matplotlib.colors import hsv_to_rgb
@@ -17,6 +19,7 @@ PROJECT_PATH = FILE_PATH.parent.parent
 RESOURCES_PATH = PROJECT_PATH / "resources"
 FIGURES_PATH = PROJECT_PATH / "figures"
 DF_PATH = PROJECT_PATH / "datafusion"
+ZENODO_URL = "https://zenodo.org/records/15496000/files/acquisitions.zip"
 
 
 # --------------------------------------------------------------------------------------
@@ -362,9 +365,68 @@ def time_volume_to_lifetime(
     return lifetime_volume, tau_min, tau_max
 
 
-# --------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------
 # Useful Functions
 # -------------------------------------------------------------------------------------
+def download_url(url: str, save_path: Path | str, chunk_size: int = 128, unzip=False):
+    """
+    Download a file from a given URL and show a progress bar.
+
+    Parameters
+    ----------
+    url: The URL of the file to be downloaded.
+    save_path: The local path where the file will be saved.
+    chunk_size: The amount of data that should be read into memory at once, by default 128.
+    """
+
+    if isinstance(save_path, str):
+        save_path = Path(save_path)
+    if save_path.exists():
+        print(f"File {save_path} already exists. Skipping download.")
+        return
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    response = requests.get(url, stream=True)
+    total_size_in_bytes = int(response.headers.get("content-length", 0))
+    progress_bar = tqdm(total=total_size_in_bytes, unit="iB", unit_scale=True)
+
+    with open(save_path, "wb") as file:
+        for data in response.iter_content(chunk_size):
+            progress_bar.update(len(data))
+            file.write(data)
+
+    progress_bar.close()
+    if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
+        print("ERROR, something went wrong")
+
+    if unzip:
+        import zipfile
+
+        # unzip and maintain the  directory structure inside the zip
+        with zipfile.ZipFile(save_path, "r") as zip_ref:
+            zip_ref.extractall(save_path.parent)
+
+
+def load_data(
+    path: str | Path,
+    max_xy_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    data = np.load(path)
+    # SPC loading (time, spectrum, x_tilde, y_tilde)
+    spc = data["spc"]
+    # CMOS loading (z, x, y)
+    cmos = data["cmos"]
+    cmos = np.transpose(cmos, (1, 2, 0))
+    cmos = ski.transform.resize(cmos, (max_xy_size, max_xy_size, cmos.shape[2]))
+    cmos = np.transpose(cmos, (2, 1, 0))
+    # Time axis
+    t = data["time_axis"]
+    # Wavelength axis
+    lam = data["spectral_axis"]
+    return spc, cmos, t, lam
+
+
 def mono_exponential_decay_numpy(t, I, tau, c):
     return I * np.exp(-t / tau) + c
 
