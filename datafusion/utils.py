@@ -1,3 +1,4 @@
+from typing import Literal
 from pathlib import Path
 from copy import deepcopy
 from joblib import Parallel, delayed
@@ -18,14 +19,14 @@ FIGURES_PATH = PROJECT_PATH / "figures"
 DF_PATH = PROJECT_PATH / "datafusion"
 
 
-# L16 at 610nm: wavelengths and sRGB values (for old colouring scheme)
-# WAVELENGTHS = np.array([547.36, 556.56, 565.76, 574.97, 584.17, 593.37, 602.57, 611.78, 620.98, 630.18, 639.38, 648.59, 657.79, 666.99, 676.19, 685.4])
-# R = np.array([154, 184, 212, 240, 255, 255, 255, 255, 255, 255, 255, 251, 241, 231, 221, 211]) / 255
-# G = np.array([255, 255, 255, 255, 241, 212, 181, 149, 114, 78, 35, 30, 30, 30, 30, 30]) / 255
-# B = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) / 255
-
-
-def calibrate_spc(spc: np.ndarray, eff_path: Path, off_path: Path):
+# --------------------------------------------------------------------------------------
+# Single-Pixel Camera Utils
+# -------------------------------------------------------------------------------------
+def calibrate_spc(
+    spc: np.ndarray,
+    eff_path: Path,
+    off_path: Path,
+) -> np.ndarray:
     """
     Calibrates the SPC data using efficiency and offset calibration.
     :param spc: SPC data of shape (n_times, n_spectra, n_measurements).
@@ -39,14 +40,16 @@ def calibrate_spc(spc: np.ndarray, eff_path: Path, off_path: Path):
 
     for spectral_index in range(spc.shape[1]):
         spc[:, spectral_index, :] *= eff[spectral_index]
-        spc[:, spectral_index, :] = np.roll(
-            spc[:, spectral_index, :], off[spectral_index], axis=0
-        )
+        spc[:, spectral_index, :] = np.roll(spc[:, spectral_index, :], off[spectral_index], axis=0)
 
     return spc
 
 
-def cut_spc(spc: np.ndarray, t: np.ndarray, max_times: int = 2048):
+def cut_spc(
+    spc: np.ndarray,
+    t: np.ndarray,
+    max_times: int = 2048,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Cuts the SPC data from its peak to a maximum number of times.
     :param spc: SPC data of shape (n_times, n_spectra, n_measurements)
@@ -64,7 +67,11 @@ def cut_spc(spc: np.ndarray, t: np.ndarray, max_times: int = 2048):
     return spc, t
 
 
-def bin_spc(spc: np.ndarray, t: np.ndarray, n_bins: int = 64):
+def bin_spc(
+    spc: np.ndarray,
+    t: np.ndarray,
+    n_bins: int = 64,
+) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Bins the SPC data.
     :param spc: SPC data of shape (n_times, n_spectra, n_measurements)
@@ -94,7 +101,7 @@ def reconstruct_spc(
     algo: callable = lstsq,
     n_jobs: int = 8,
     img_dim: int = 32,
-):
+) -> np.ndarray:
     """
     Reconstructs the SPC from the forward matrix and the SPC.
     :param spc: SPC  to reconstruct of shape (n_times, n_spectra, n_measurements).
@@ -117,8 +124,10 @@ def reconstruct_spc(
 
 
 def load_raw_spc(
-    spc_path: Path, n_measurements: int = 1024, dtype: np.dtype = np.float64
-):
+    spc_path: Path,
+    n_measurements: int = 1024,
+    dtype: np.dtype = np.float64,
+) -> np.ndarray:
     """
     Loads the raw SPC data. The data is expected to be in the shape (n_measurements, n_spectra, n_times).
     :param spc_path: Path to the additional SPC data.
@@ -150,10 +159,10 @@ def preprocess_raw_spc(
     algo: callable = lstsq,
     compression: float | None = 1,
     dtype: np.dtype = np.float64,
-):
+) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Preprocesses the raw SPC data and saves the reconstruction.
-    The preprocessing steps it takes are:
+    The preprocessing steps are:
     1. Calibrate the SPC data.
     2. Cut the SPC data.
     3. Bin the SPC data.
@@ -170,6 +179,7 @@ def preprocess_raw_spc(
     :param n_jobs: Number of jobs to use for parallelization.
     :param dtype: Data type to use.
     :param algo: Algorithm to use for the reconstruction.
+    TODO: Add TVAL3 as vendored with Python-MATLAB wrapper or rewrite TVAL3
     :param compression: Compression factor to use.
     :return: The reconstructed SPC data, the binned time axis, and the binned time step.
     """
@@ -190,9 +200,7 @@ def preprocess_raw_spc(
 
     spc_calib = calibrate_spc(spc, efficiency_calib_path, offset_calib_path)
     spc_calib_cut, t_cut = cut_spc(spc_calib, t, max_times=max_times)
-    spc_calib_cut_binned, t_cut_binned, dt_cut_binned = bin_spc(
-        spc_calib_cut, t_cut, n_bins=n_bins
-    )
+    spc_calib_cut_binned, t_cut_binned, dt_cut_binned = bin_spc(spc_calib_cut, t_cut, n_bins=n_bins)
 
     spc_recon = reconstruct_spc(
         spc_calib_cut_binned,
@@ -210,7 +218,15 @@ def preprocess_raw_spc(
     return spc_recon, t_cut_binned, dt_cut_binned
 
 
-def linear_to_srgb(channel):
+# --------------------------------------------------------------------------------------
+# Color-Related Utils
+# -------------------------------------------------------------------------------------
+def linear_to_srgb(channel: np.ndarray) -> np.ndarray:
+    """
+    Transform to sRGB
+    :param channel: ndarray to convert
+    :return: new ndarray
+    """
     channel = channel.clip(0, 1)
     return np.where(
         channel <= 0.0031308,
@@ -219,20 +235,41 @@ def linear_to_srgb(channel):
     )
 
 
-def wavelength_to_srgb(lambdas, method):
+def wavelength_to_srgb(
+    lambdas: np.ndarray,
+    method: Literal["basic", "advanced"] = "basic",
+) -> np.ndarray:
+    """
+    Converts wavelengths employed to sRGB.
+    :param lambdas: Wavelengths used by the detector
+    :param method: "basic" or "advanced"
+    FIXME: better document the two methods
+    :return: new 1D array for wavelengths converted to sRGB
+    """
     cmf_table = np.loadtxt(RESOURCES_PATH / f"srgb_cmf_{method}.csv", delimiter=",")
     wavelengths = cmf_table[:, 0].flatten()
     srgb_cmf = cmf_table[:, 1:].T
     return np.array([np.interp(lambdas, wavelengths, channel) for channel in srgb_cmf])
 
 
-def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
+def spectral_volume_to_color(
+    lambdas: np.ndarray,
+    spectral_volume: np.ndarray,
+    method: Literal["basic", "advanced"] = "basic",
+) -> np.ndarray:
+    """
+    Converts a spectral volume (many channels of the spectrum) to an RGB color volume.
+    :param lambdas: Wavelengths used by the detector.
+    :param spectral_volume: Spectral volume of shape (channels, depth, height, width).
+    :param method: "basic" or "advanced" for the conversion method.
+    :return: RGB converted volume.
+    """
     if lambdas[0] < 380 or lambdas[-1] > 780:
         raise ValueError("Wavelength range out of visible range")
 
     if spectral_volume.ndim != 4:
         raise ValueError(
-            "The spectral_volume should have 4 dimensions: (n_lambdas, depth, height, width)"
+            "The spectral_volume should have 4 dimensions: (channels, depth, height, width)"
         )
 
     if lambdas.shape[0] != spectral_volume.shape[0]:
@@ -256,7 +293,28 @@ def spectral_volume_to_color(lambdas, spectral_volume, method="basic"):
     return srgb_volume
 
 
-def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1):
+def time_volume_to_lifetime(
+    t: np.ndarray,
+    tensor: np.ndarray,
+    *,
+    tau_clip: None | tuple[float, float] = None,
+    max_tau: float = 6.0,
+    noise_thr: float = 0.1,
+) -> tuple[np.ndarray, float, float]:
+    """
+    Calculates the lifetime volume from a time tensor using a mono-exponential decay model.
+    The function fits a mono-exponential decay to each voxel in the tensor and returns an RGB volume
+    colored based on the lifetime (tau) values of each voxel.
+    :param t: time axis of shape (n_times,).
+    :param tensor: temporal decay volume of shape (n_times, depth, height, width).
+    :param tau_clip: Tuple of two floats to clip the tau values, or None to not clip.
+    :param max_tau: Maximum tau value to consider for fitting.
+    :param noise_thr: Threshold for noise, below which the voxel is considered noise and set to zero.
+    :return: A tuple containing:
+                - lifetime_volume: RGB volume of shape (depth, height, width, 3).
+                - tau_min: Minimum tau value in the volume.
+                - tau_max: Maximum tau value in the volume.
+    """
     lifetime_volume = np.zeros(
         (tensor.shape[1], tensor.shape[2], tensor.shape[3], 3), dtype=np.float32
     )
@@ -297,37 +355,22 @@ def time_volume_to_lifetime(t, tensor, tau_clip=None, max_tau=6.0, noise_thr=0.1
     tau_max = tau_out.max()
     for zi in range(tensor.shape[1]):
         # h = (260 / 360) * (1 - (tau_out[zi] - tau_min) / (tau_max - tau_min))
-        h = (260 / 360) * (
-            1 - (tau_out[zi] - tau_clip[0]) / (tau_clip[1] - tau_clip[0])
-        )
+        h = (260 / 360) * (1 - (tau_out[zi] - tau_clip[0]) / (tau_clip[1] - tau_clip[0]))
         lifetime_volume[zi] = hsv_to_rgb(
             np.stack([h, np.ones_like(tau_out[zi]), a_out[zi]], axis=-1)
         )
     return lifetime_volume, tau_min, tau_max
 
 
+# --------------------------------------------------------------------------------------
+# Useful Functions
+# -------------------------------------------------------------------------------------
 def mono_exponential_decay_numpy(t, I, tau, c):
     return I * np.exp(-t / tau) + c
 
 
 def mono_exponential_decay_torch(I, tau, c, t):
     return (I.unsqueeze(1) * torch.exp(-t / tau.unsqueeze(1)) + c.unsqueeze(1)).T
-
-
-def get_discrete_time_decay(tensor, t):
-    if isinstance(tensor, np.ndarray):
-        tensor = torch.from_numpy(tensor.astype(np.float32))
-
-    tensor = tensor.reshape(tensor.shape[0], -1)
-    tensor = mono_exponential_decay_torch(tensor[0], tensor[1], tensor[2], t)
-    tensor = tensor.reshape(
-        len(t),
-        tensor.shape[1],
-        tensor.shape[2],
-        tensor.shape[3],
-        tensor.shape[4],
-    )
-    return tensor
 
 
 def sam(vec1, vec2):
