@@ -15,6 +15,7 @@ https://github.com/user-attachments/assets/f0ec59b7-89d7-4ceb-8ca2-f67bbd98fbae
 - ⚙️ [Instructions](#instructions)
 - ℹ️ [How does it work?](#how-does-it-work)
 - ⚡️ [How to use it?](#how-to-use-it)
+- 🙌 [Acknowledgements](#acknowledgements)
 
 ## Instructions
 Use conda to create an environment with the required dependencies.
@@ -49,6 +50,7 @@ where:
 * $T$, $S$ and $D$ are the summation operators over different dimensions,
   temporal decay, spectrum, and depth dimensions, respectively
 * $R$ is the downsampling operator in 2D.
+* $w_1$ and $w_2$ are the weights for the fidelity terms.
 
 `fusion.py` provides two ways to solve the optimization problem:
 
@@ -75,7 +77,7 @@ download_url(
 )
 
 # Load the data.
-cmos, spc, _, _ = load_data(
+spc, cmos, _, _ = load_data(
     path=RESOURCES_PATH / "acquisitions" / "cells" / "cells_0.50cr.npz",
     max_xy_size=128,
 )
@@ -104,6 +106,6 @@ x, _, _ = fuse_with_cg(max_iterations=20)
 This work is supported by the European Union (GA 101072354) 🇪🇺
 and the UK Research and Innovation (EP/X030733/1) 🇬🇧. It comes from
 the effort and synergy of multiple people from different fields:
-Federico Simon, Serban Cristian Tudosie, Shivaprasad Varakkoth, 
+Federico Simoni, Serban Cristian Tudosie, Shivaprasad Varakkoth, 
 Valerio Gandolfi, Simon Arridge,
 Andrea Farina, and Cosimo D'Andrea.

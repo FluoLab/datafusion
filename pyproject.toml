@@ -7,9 +7,9 @@ name = "datafusion"
 version = "0.0.1"
 authors = [
     { name = "Serban Cristian Tudosie", email = "sc.tudosie.23@ucl.ac.uk" },
-    { name = "Valerio Gandolfi", email = "valerio.gandolfi@polimi.it" },
     { name = "Federico Simoni", email = "federico.simoni@polimi.it" },
     { name = "Shivaprasad Varakkoth", email = "shivaprasad.varakkoth@polimi.it" },
+    { name = "Valerio Gandolfi", email = "valerio.gandolfi@polimi.it" },
 ]
 description = "Data fusion for high resolution lambdaFLIM imaging."
 readme = "README.md"
