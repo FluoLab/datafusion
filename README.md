@@ -1,6 +1,4 @@
 # datafusion
-
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15496000.svg)](https://doi.org/10.5281/zenodo.15496000)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
 Fusing multidimensional data together, with a focus on microscopy.
@@ -13,6 +11,7 @@ https://github.com/user-attachments/assets/f0ec59b7-89d7-4ceb-8ca2-f67bbd98fbae
 ## Table of Contents
 
 - ⚙️ [Instructions](#instructions)
+- 💾 [Data](#data)
 - ℹ️ [How does it work?](#how-does-it-work)
 - ⚡️ [How to use it?](#how-to-use-it)
 - 🙌 [Acknowledgements](#acknowledgements)
@@ -33,6 +32,11 @@ conda env create -f environment.yml
 # Activate environment
 conda activate datafusion
 ```
+
+## Data
+You can find the data used in this repository on Zenodo:   
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15496000.svg)](https://doi.org/10.5281/zenodo.15496000)
+
 
 ## How does it work?
 
