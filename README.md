@@ -1,5 +1,7 @@
 # datafusion
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![YouTube Video](https://img.shields.io/badge/YouTube-Video-red?logo=youtube)](https://www.youtube.com/live/o9RJWYfriac?t=3306s)
+
 
 Fusing multidimensional data together, with a focus on microscopy.
 This repo allows you to fuse time-resolved multispectral single-pixel camera data (4D) with
