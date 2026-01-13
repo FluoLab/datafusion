@@ -7,9 +7,6 @@ dependencies:
   - python>=3.10
   - black
   - pip
-  - pytorch
-  - torchvision
-  - torchmetrics
   - numpy
   - scikit-image
   - scipy
@@ -21,5 +18,8 @@ dependencies:
   - deepinv
 
   - pip:
-      - pyvista[jupyter]
+      # - pyvista[jupyter]
+      - torch
+      - torchvision
+      - torchmetrics
       - "-e ."

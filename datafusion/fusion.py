@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm.autonotebook import tqdm
+from tqdm.auto import tqdm
 from torch.nn.functional import conv2d, conv_transpose2d
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import resize
@@ -117,6 +117,7 @@ class Fusion:
         total_energy: float = 1.0,
         device: str = "cpu",
         seed: int = 42,
+        verbose: bool = False,
     ):
         """
         Initializes the Fusion class with the provided parameters.
@@ -146,6 +147,7 @@ class Fusion:
             case _:
                 raise TypeError("cmos must be a numpy.ndarray or torch.Tensor")
 
+        self.verbose = verbose
         self.weights = weights
         self.init_type = init_type
         self.tol = tol
@@ -313,12 +315,13 @@ class FusionAdam(Fusion):
         :return: A tuple containing the optimized x tensor, normalized SPC, and normalized CMOS.
         """
 
-        history = np.zeros((max_iterations, len(self.weights) + 1))
+        if self.verbose:
+            history = np.zeros((max_iterations, len(self.weights) + 1))
 
         self.x = torch.nn.Parameter(self.x, requires_grad=True)
         optimizer = torch.optim.Adam([self.x], lr=lr, amsgrad=False)
 
-        for i in (progress_bar := tqdm(range(max_iterations))):
+        for i in (progress_bar := tqdm(range(max_iterations), disable=not self.verbose)):
             self.prev_x = self.x.detach().clone() if self.tol is not None else None
             optimizer.zero_grad()
 
@@ -350,22 +353,24 @@ class FusionAdam(Fusion):
             if sensitivity is not None and sensitivity < self.tol:
                 break
 
-            history[i] = np.array(
-                [
-                    spatial_loss.item(),
-                    spectro_temporal_loss.item(),
-                    loss.item(),
-                    # global_loss.item(),
-                ]
-            )
+            if self.verbose:
+                history[i] = np.array(
+                    [
+                        spatial_loss.item(),
+                        spectro_temporal_loss.item(),
+                        loss.item(),
+                        # global_loss.item(),
+                    ]
+                )
 
-        _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
-        for i, title in enumerate(["Spatial", "Spectro Temporal", "Total"]):
-            ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
-            ax[i].set_title(title)
-            ax[i].set_yscale("log")
-        plt.tight_layout()
-        plt.show()
+        if self.verbose:
+            _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
+            for i, title in enumerate(["Spatial", "Spectro Temporal", "Total"]):
+                ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
+                ax[i].set_title(title)
+                ax[i].set_yscale("log")
+            plt.tight_layout()
+            plt.show()
 
         if return_numpy:
             return (
@@ -407,16 +412,17 @@ class FusionCG(Fusion):
         :return: A tuple containing the optimized x tensor, normalized SPC, and normalized CMOS.
         """
 
-        history = np.zeros((max_iterations, len(self.weights) + 2))
+        if self.verbose:
+            history = np.zeros((max_iterations, len(self.weights) + 2))
 
         A = lambda x: (
             self.w1 * self.T.T(self.S.T(self.S(self.T(x))))
             + self.w2 * self.D.T(self.R.T(self.R(self.D(x))))
         )
 
-        b = (self.w1 * self.T.T(self.S.T(self.cmos.unsqueeze(0).unsqueeze(0))) +
-             self.w2 * self.D.T(self.R.T(self.spc.unsqueeze(2))
-        ))
+        b = self.w1 * self.T.T(self.S.T(self.cmos.unsqueeze(0).unsqueeze(0))) + self.w2 * self.D.T(
+            self.R.T(self.spc.unsqueeze(2))
+        )
 
         # Slightly modified version of the conjugate gradient method from:
         # https://deepinv.github.io/deepinv/_modules/deepinv/optim/utils.html#conjugate_gradient
@@ -425,7 +431,7 @@ class FusionCG(Fusion):
         p = r
         rsold = torch.dot(r.flatten(), r.flatten())
 
-        for i in (progress_bar := tqdm(range(int(max_iterations)))):
+        for i in (progress_bar := tqdm(range(int(max_iterations)), disable=not self.verbose)):
             self.prev_x = self.x.clone() if self.tol is not None else None
 
             Ap = A(p)
@@ -454,23 +460,25 @@ class FusionCG(Fusion):
                 # f"Global: {global_loss.item():.2E} | "
             )
 
-            history[i] = np.array(
-                [
-                    spatial_loss.item(),
-                    spectro_temporal_loss.item(),
-                    loss.item(),
-                    rsnew.item(),
-                    # global_loss.item(),
-                ]
-            )
+            if self.verbose:
+                history[i] = np.array(
+                    [
+                        spatial_loss.item(),
+                        spectro_temporal_loss.item(),
+                        loss.item(),
+                        rsnew.item(),
+                        # global_loss.item(),
+                    ]
+                )
 
-        _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
-        for i, title in enumerate(["Spatial", "Spectro Temporal", "Total", "Residual"]):
-            ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
-            ax[i].set_title(title)
-            ax[i].set_yscale("log")
-        plt.tight_layout()
-        plt.show()
+        if self.verbose:
+            _, ax = plt.subplots(1, history.shape[1], figsize=(4 * history.shape[1], 4))
+            for i, title in enumerate(["Spatial", "Spectro Temporal", "Total", "Residual"]):
+                ax[i].scatter(np.arange(len(history[:, i])), history[:, i], marker=".")
+                ax[i].set_title(title)
+                ax[i].set_yscale("log")
+            plt.tight_layout()
+            plt.show()
 
         if return_numpy:
             return (
