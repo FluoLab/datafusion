@@ -45,8 +45,8 @@ from datafusion.utils import load_data, RESOURCES_PATH, ZENODO_URL, download_url
 )
 @click.option(
     "--download",
-    is_flag=True,
     default=False,
+    is_flag=True,
     show_default=True,
     help="Whether to download the data if not present.",
 )
@@ -68,7 +68,7 @@ def run_benchmark(
         device = "cpu"
 
     if download:
-        download_url(ZENODO_URL, RESOURCES_PATH, unzip=True)
+        download_url(ZENODO_URL, RESOURCES_PATH / "acquisitions.zip", unzip=True)
 
     spc, cmos, _, _ = load_data(
         path=RESOURCES_PATH / "acquisitions" / "cells" / f"cells_{cr}cr.npz",
