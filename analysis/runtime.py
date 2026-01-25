@@ -11,10 +11,10 @@ from datafusion.utils import load_data, RESOURCES_PATH, ZENODO_URL, download_url
 
 @click.command()
 @click.option(
-    "--n-runs",
+    "--n_runs",
     "n_runs",
     "-n",
-    default=5,
+    default=10,
     type=int,
     show_default=True,
     help="Number of runs to time.",
@@ -75,6 +75,7 @@ def run_benchmark(
         max_xy_size=128,
     )
 
+    iterations = None
     runtimes = np.zeros(n_runs)
     for i in range(n_runs):
         if method == "adam":
@@ -84,7 +85,7 @@ def run_benchmark(
                 weights=weights,
                 init_type="baseline",
                 mask_noise=False,
-                tol=1e-6,
+                tol=3e-3,
                 total_energy=1,
                 device=device,
                 seed=42,
@@ -102,7 +103,7 @@ def run_benchmark(
                 weights=weights,
                 init_type="baseline",
                 mask_noise=False,
-                tol=1e-6,
+                tol=3e-3,
                 total_energy=1,
                 device=device,
                 seed=42,
@@ -116,10 +117,11 @@ def run_benchmark(
         else:
             raise ValueError(f"Unknown method: {method}")
 
+        iterations = fusion.curr_iter
+
         # Clean everything from GPU memory and force garbage collection
         try:
             del fusion
-            del x
         except NameError:
             pass
         if torch.cuda.is_available():
@@ -128,7 +130,7 @@ def run_benchmark(
 
     print(f"Mean runtime: {np.mean(runtimes):.1f} s")
     print(f"Std runtime: {np.std(runtimes):.4f} s")
-
+    print(f"Iterations: {iterations}")
 
 if __name__ == "__main__":
     run_benchmark()

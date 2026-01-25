@@ -102,7 +102,7 @@ class Fusion:
     """
     Base class for data fusion methods.
     This class initializes the necessary parameters and operators for data fusion.
-    It provides methods for normalization, loss calculation, and sensitivity calculation.
+    It provides methods for normalization, loss calculation, and tolerance calculation.
     """
 
     def __init__(
@@ -112,7 +112,7 @@ class Fusion:
         *,
         weights: dict,
         init_type: str,
-        tol: float | None = 1e-6,
+        tol: float | None = 3e-3,
         mask_noise: bool = False,
         total_energy: float = 1.0,
         device: str = "cpu",
@@ -125,7 +125,7 @@ class Fusion:
         :param cmos: CMOS data tensor of shape (z, x, y).
         :param weights: Dictionary containing weights for different loss components.
         :param init_type: Type of initialization for the parameters ("random", "zeros", "baseline").
-        :param tol: Tolerance for convergence. If None, sensitivity is not considered.
+        :param tol: Tolerance for convergence. If None, tolerance is not considered.
         :param mask_noise: If True, applies a mask to the noise in the input data.
         :param total_energy: Total energy to normalize the input data.
         :param device: Device to perform the computations on (e.g., "cpu" or "cuda").
@@ -150,6 +150,7 @@ class Fusion:
         self.verbose = verbose
         self.weights = weights
         self.init_type = init_type
+        self.curr_iter = 0
         self.tol = tol
         self.seed = seed
         self.mask_noise = mask_noise
@@ -240,13 +241,15 @@ class Fusion:
 
         return spatial_loss, spectro_temporal_loss
 
-    def sensitivity(self) -> torch.Tensor:
+    def tolerance(self) -> torch.Tensor:
         """
-        Computes the sensitivity of the current solution, computed as:
-            || x - prev_x ||_2
-        :return: sensitivity
+        Computes the tolerance of the current solution, computed as:
+            || x - prev_x ||_2 / || x ||_2
+        :return: tolerance
         """
-        return torch.linalg.vector_norm(self.x.flatten() - self.prev_x.flatten())
+        diff_norm = torch.linalg.vector_norm(self.x.flatten() - self.prev_x.flatten())
+        sens = diff_norm / torch.linalg.vector_norm(self.x.flatten())
+        return sens
 
     def _initialize(self) -> torch.Tensor:
         """
@@ -322,6 +325,7 @@ class FusionAdam(Fusion):
         optimizer = torch.optim.Adam([self.x], lr=lr, amsgrad=False)
 
         for i in (progress_bar := tqdm(range(max_iterations), disable=not self.verbose)):
+            self.curr_iter += 1
             self.prev_x = self.x.detach().clone() if self.tol is not None else None
             optimizer.zero_grad()
 
@@ -341,16 +345,16 @@ class FusionAdam(Fusion):
                 with torch.no_grad():
                     self.x.copy_(self.x.data.clamp(min=0))
 
-            sensitivity = self.sensitivity().item() if self.tol is not None else None
+            tolerance = self.tolerance().item() if self.tol is not None else None
 
             progress_bar.set_description(
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Spectro Temporal: {spectro_temporal_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
-                f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
+                f"Sensitivity: {f'{tolerance:.2E}' if tolerance is not None else 'Not considered'} | "
             )
 
-            if sensitivity is not None and sensitivity < self.tol:
+            if tolerance is not None and tolerance < self.tol:
                 break
 
             if self.verbose:
@@ -392,6 +396,7 @@ class FusionCG(Fusion):
         self.w1 = self.weights["spatial"]
         self.w2 = self.weights["spectro_temporal"]
 
+    @torch.no_grad()
     def __call__(
         self,
         max_iterations: int,
@@ -432,6 +437,7 @@ class FusionCG(Fusion):
         rsold = torch.dot(r.flatten(), r.flatten())
 
         for i in (progress_bar := tqdm(range(int(max_iterations)), disable=not self.verbose)):
+            self.curr_iter += 1
             self.prev_x = self.x.clone() if self.tol is not None else None
 
             Ap = A(p)
@@ -441,9 +447,9 @@ class FusionCG(Fusion):
             rsnew = torch.dot(r.flatten(), r.flatten())
             assert rsnew.isfinite(), "Conjugate gradient diverged"
 
-            # We break based on sensitivity or max iterations
-            sensitivity = self.sensitivity() if self.tol is not None else None
-            if self.tol is not None and sensitivity < self.tol:
+            # We break based on tolerance or max iterations
+            tolerance = self.tolerance() if self.tol is not None else None
+            if self.tol is not None and tolerance < self.tol:
                 break
 
             p = r + p * (rsnew / (rsold + eps))
@@ -455,7 +461,7 @@ class FusionCG(Fusion):
                 f"Spatial: {spatial_loss.item():.2E} | "
                 f"Spectro Temporal: {spectro_temporal_loss.item():.2E} | "
                 f"Total: {loss.item():.2E} | "
-                f"Sensitivity: {f'{sensitivity:.2E}' if sensitivity is not None else 'Not considered'} | "
+                f"Sensitivity: {f'{tolerance:.2E}' if tolerance is not None else 'Not considered'} | "
                 f"Residual: {rsnew.item():.2E}"
                 # f"Global: {global_loss.item():.2E} | "
             )
